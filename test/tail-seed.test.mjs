@@ -230,3 +230,44 @@ test('请求头补不回来时，丢弃这条工具增量消息', () => {
   assert.equal(seed.some(event => event.type === 'request/header'), false)
   assertSelfConsistent(seed)
 })
+
+test('--turns N：只保留压缩点之后最后 N 个完整轮次', () => {
+  const built = buildTailSeed(fixture(), { turns: 1 })
+  assert.equal(built.error, undefined)
+  assertSelfConsistent(built.seed)
+  assert.equal(built.stats.keptTurns, 1)
+  assert.equal(built.stats.interruptedTurnEvents, 0, '指定轮次时不接被打断的那半截')
+  assert.equal(built.stats.summaryKept, true)
+  const turnsSeen = [...new Set(built.seed.map(event => event.data?.turn).filter(turn => typeof turn === 'number'))]
+  assert.deepEqual(turnsSeen.sort((left, right) => left - right), [1], '最后一个完整轮次重排为 turn 1')
+  assert.equal(built.seed.filter(event => event.type === 'turn/start').length, 1)
+})
+
+test('--drop-summary：不带压缩摘要，从第一个完整轮次开始', () => {
+  const built = buildTailSeed(fixture(), { includeSummary: false })
+  assert.equal(built.error, undefined)
+  assertSelfConsistent(built.seed)
+  assert.equal(built.stats.summaryKept, false)
+  assert.equal(built.stats.interruptedTurnEvents, 0)
+  assert.equal(built.seed.some(event => event.data?.source?.kind === 'compact-checkpoint'), false, '摘要消息整条不带')
+  assert.deepEqual(built.seed.slice(0, 3).map(event => event.type),
+    ['permission/preset', 'session/title', 'model/selection'], '运行态仍从旧日志继承')
+  assert.equal(built.seed[3].type, 'turn/start')
+  assert.equal(built.stats.keptTurns, 1)
+})
+
+test('轮次不够时报 not-enough-turns', () => {
+  const built = buildTailSeed(fixture(), { turns: 99 })
+  assert.equal(built.error, 'not-enough-turns')
+  assert.deepEqual(built.detail, { available: 1, requested: 99 })
+})
+
+test('别人的分叉标记不跟着搬：session/end-seed 丢弃', () => {
+  const events = fixture()
+  events.splice(29, 0, { type: 'session/end-seed', seq: 29, time: 29, data: { inherited: true } })
+  events.forEach((event, index) => { event.seq = index })
+  const built = buildTailSeed(events)
+  assert.equal(built.error, undefined)
+  assert.equal(built.seed.some(event => event.type === 'session/end-seed'), false)
+  assertSelfConsistent(built.seed)
+})

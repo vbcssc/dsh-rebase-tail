@@ -40,9 +40,13 @@ pnpm add link:D:/docker_and_big_models/开源仓库-分析区/dsh-rebase-tail
 在要甩包袱的会话里执行：
 
 ```
-/rebase-tail                  # 默认：保留压缩点所在 turn 的后半截
-/rebase-tail --drop-open-turn # 丢掉那半截，只留之后完整结束的轮次
+/rebase-tail                             # 默认：压缩点之后的全部，含压缩摘要 + 被打断那轮的后半截
+/rebase-tail --drop-open-turn           # 不接那半截，只留之后完整结束的轮次
+/rebase-tail --turns 3                  # 只留最后 3 个完整轮次（摘要仍然带着）
+/rebase-tail --turns 3 --drop-summary   # 再连压缩摘要那条消息也不带
 ```
+
+**默认输出可能比你以为的大**：压缩只遮住它自己那次的范围，所以"压缩点之后的尾巴"往往就是日志的大半。实测一个 2195 条 / 13 轮的会话，唯一一次压缩发生在第 1 轮末尾（替换 seq 13–928），默认结果仍有 1110 条 / 11 轮 —— 那不是漏搬，它们本来就都在压缩点之后。要更小就用 `--turns N`，要连摘要那段回顾也不看就再加 `--drop-summary`。
 
 - 不触发模型调用，不花 token，不改动原会话。
 - 成功后返回新会话 id，并（尽力）把它挂到父会话所在工作区；在会话列表里打开它继续即可。
@@ -64,6 +68,8 @@ pnpm add link:D:/docker_and_big_models/开源仓库-分析区/dsh-rebase-tail
 - **重排**：`seq` 从 0 连续；`turn` 从 1、每轮 `step` 从 1 重排；`surfaceOp` / `sourceEventSeqs` 按新编号重写，指向已丢弃事件的替换降级为 `append`、悬空引用删除。
 - **工具增量消息**：`developer/message` 的 `headerSeq` 按新编号重写；它引用的 `request/header` 若落在压缩区，会被补进种子并排在引用者之前（校验要求 `headerSeq` 恰好当存在工具增量时出现，且必须指向更早的 `request/header`）。请求头补不回来时，这条消息整条丢弃。
 - **拒绝执行**：没有压缩点；最后一次压缩没留下检查点；压缩点之后没有完整结束的轮次；当前这一轮还没结束（`turn-open`，等它跑完再执行）。
+- **`session/end-seed` 不搬**：那是父会话（或它的祖先）的分叉/播种标记，搬过去会让新会话看起来继承了一段历史。
+- **运行态取"第一个保留事件之前"的最后一次**，用 `--turns` 砍掉前面几轮时不会沿用更早的 preset / 模型选择。
 - 不搬的东西：子代理派生关系、goal/plan/todo 等会话级状态、`turn/end` 之后的队列快照。
 
 ## 实测
@@ -78,6 +84,7 @@ pnpm add link:D:/docker_and_big_models/开源仓库-分析区/dsh-rebase-tail
 
 ## 已知边界
 
+- **压缩摘要会作为第一条 user 消息出现**（`This is an automatically generated checkpoint …` 那种 9KB 级回顾）。它是模型可见上下文的一部分，默认原样带过来；`--drop-summary` 可以不带。
 - **新会话里的下一轮对话没有测过**：验证只到「模型可见请求构造正确 + 会话能渲染/恢复」。
 - 压缩点所在 turn 的后半截里若出现 `/compact`、图片 offload、tool-result 裁剪等**跨切点替换**事件，当前策略一律降级为 `append`。
 - preset 必须在该宿主里存在，否则会话本身就无法恢复（`Unknown agent preset`）——与插件无关，但会让命令无处可跑。

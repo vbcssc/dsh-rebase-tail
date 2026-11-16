@@ -1,6 +1,6 @@
 {
   "name": "dsh-rebase-tail",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "斜杠命令 /rebase-tail：把「最近一次压缩之后」的对话重建为一个新会话，甩掉已压缩的历史包袱。",
   "keywords": [

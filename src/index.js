@@ -17,12 +17,39 @@ import { buildTailSeed } from './tail-seed.js'
 
 export const name = 'dsh-rebase-tail'
 
-const USAGE = '用法：/rebase-tail [--drop-open-turn]'
+const USAGE = '用法：/rebase-tail [--turns N] [--drop-summary] [--drop-open-turn]'
 const ERROR_TEXT = {
   'no-compaction': '这个会话还没有压缩点（没有 compaction/summary），没有包袱可甩。',
   'no-checkpoint': '最后一次压缩没有留下检查点消息，无法定位尾部起点。',
   'no-closed-turn': '压缩点之后没有任何完整结束的轮次，无法重建会话。',
   'turn-open': '当前这一轮还没结束。等它跑完再执行 /rebase-tail。',
+  'bad-turns': '--turns 需要一个大于 0 的整数。',
+}
+
+/**
+ * 解析命令行参数。
+ * @param raw - 斜杠命令后面的原始文本。
+ * @returns 选项，或 { error } 表示用法错误。
+ */
+function parseArguments(raw) {
+  const options = { includeInterruptedTurn: true, includeSummary: true, turns: undefined }
+  const tokens = raw.split(/\s+/).filter(token => token.length > 0)
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (token === '--drop-open-turn') { options.includeInterruptedTurn = false; continue }
+    if (token === '--drop-summary') { options.includeSummary = false; continue }
+    const inline = token.startsWith('--turns=') ? token.slice('--turns='.length) : undefined
+    if (token === '--turns' || inline !== undefined) {
+      const value = inline ?? tokens[index + 1]
+      const parsed = Number.parseInt(value ?? '', 10)
+      if (!Number.isFinite(parsed) || parsed < 1) return { error: USAGE }
+      options.turns = parsed
+      if (inline === undefined) index += 1
+      continue
+    }
+    return { error: USAGE }
+  }
+  return { options }
 }
 
 /** 最后一个 model/selection 记录的路线，用作新会话的初始路线。 */
@@ -84,13 +111,20 @@ async function attachWorkspace(ctx, parentSessionId, childSessionId) {
  * @returns 命令结果。
  */
 async function execute(ctx, invocation) {
-  const raw = invocation.rawInput.trim()
-  if (raw.length > 0 && raw !== '--drop-open-turn') return { kind: 'error', text: USAGE }
+  const parsed = parseArguments(invocation.rawInput.trim())
+  if (parsed.error !== undefined) return { kind: 'error', text: parsed.error }
 
   const parent = invocation.agent.session
   const observation = await ctx.sessionQuery.observeSession(parent.id, { signal: invocation.signal })
   try {
-    const built = buildTailSeed(observation.events, { includeInterruptedTurn: raw !== '--drop-open-turn' })
+    const built = buildTailSeed(observation.events, parsed.options)
+    if (built.error === 'not-enough-turns') {
+      return {
+        kind: 'error',
+        text: '压缩点之后只有 ' + String(built.detail?.available ?? 0) + ' 个完整轮次，保留不了 '
+          + String(built.detail?.requested ?? 0) + ' 个。',
+      }
+    }
     if (built.error !== undefined) return { kind: 'error', text: ERROR_TEXT[built.error] ?? built.error }
 
     const header = observation.header
@@ -114,7 +148,10 @@ async function execute(ctx, invocation) {
       kind: 'success',
       text: '已建好尾部会话 ' + childSessionId
         + '：' + String(stats.sourceEvents) + ' 条事件 -> ' + String(stats.seedEvents) + ' 条'
-        + '（压缩点之后，含未完成轮次 ' + String(stats.interruptedTurnEvents) + ' 条）'
+        + '（压缩点之后 ' + String(stats.keptTurns) + ' 个完整轮次'
+        + (stats.interruptedTurnEvents > 0 ? '＋未完成轮次 ' + String(stats.interruptedTurnEvents) + ' 条' : '')
+        + (stats.summaryKept ? '，含压缩摘要' : '，不含压缩摘要')
+        + '）'
         + (stats.droppedOrphans > 0 ? '，剔除孤儿工具结果 ' + String(stats.droppedOrphans) + ' 条' : '')
         + (attached ? '，已挂到当前工作区' : '')
         + '。在会话列表里打开它继续。',

@@ -64,11 +64,16 @@ function dropOrphanResults(fragment) {
 /**
  * 构造种子事件。
  * @param events - 源会话事件（seq 连续，从 0 开始）。
- * @param options - includeInterruptedTurn:false 时丢掉压缩点所在 turn 的后半截。
+ * @param options - includeInterruptedTurn:false 丢掉压缩点所在 turn 的后半截；
+ *   includeSummary:false 连压缩摘要那条消息也不带（此时同样丢掉那半截）；
+ *   turns:N 只保留压缩点之后最后 N 个完整轮次。
  * @returns { seed, stats } 或 { error, detail }。
  */
 export function buildTailSeed(events, options = {}) {
   const includeInterruptedTurn = options.includeInterruptedTurn !== false
+  const includeSummary = options.includeSummary !== false
+  const keepTurns = typeof options.turns === 'number' && Number.isFinite(options.turns) ? Math.floor(options.turns) : undefined
+  if (keepTurns !== undefined && keepTurns < 1) return { error: 'bad-turns' }
 
   let lastSummary = -1
   for (let index = 0; index < events.length; index += 1) {
@@ -90,35 +95,56 @@ export function buildTailSeed(events, options = {}) {
     if (events[index].type === 'turn/start') return { error: 'turn-open' }
   }
 
-  const cut = checkpointIndex
-  const tail = events.slice(cut, lastTurnEnd + 1)
+  // 压缩点所在 turn 的前半截已被压缩，尾部从这里切开：前半截（没有 turn/start）是"被打断的那一轮的后半截"。
+  const tail = events.slice(checkpointIndex, lastTurnEnd + 1)
   const firstTurnStart = tail.findIndex(event => event.type === 'turn/start')
   const splitAt = firstTurnStart < 0 ? tail.length : firstTurnStart
   const interruptedRaw = tail.slice(0, splitAt)
   const closed = tail.slice(splitAt)
 
+  const turnStarts = []
+  closed.forEach((event, index) => { if (event.type === 'turn/start') turnStarts.push(index) })
+  let closedFrom = 0
+  if (keepTurns !== undefined) {
+    if (turnStarts.length < keepTurns) {
+      return {
+        error: turnStarts.length === 0 ? 'no-closed-turn' : 'not-enough-turns',
+        detail: { available: turnStarts.length, requested: keepTurns },
+      }
+    }
+    closedFrom = turnStarts[turnStarts.length - keepTurns]
+  }
+
+  // 压缩事务与 session/end-seed 都是簿记事件：新会话不该继承别人的分叉标记。
+  const isBookkeeping = event => COMPACTION_TYPES.has(event.type) || event.type === 'session/end-seed'
+  const closedKept = closed.slice(closedFrom).filter(event => !isBookkeeping(event))
+  // 不带摘要时也不接那半截：没有摘要打底，孤立的后半截读不出上下文。
+  const keepFragment = includeInterruptedTurn && includeSummary && keepTurns === undefined
+  const keptTurns = closedKept.filter(event => event.type === 'turn/start').length
+  if (!includeSummary && keptTurns === 0) return { error: 'no-closed-turn' }
+
+  // 运行态取"第一个保留事件"之前的最后一次出现，避免沿用更早的 preset / 模型选择。
+  const firstKeptSeq = includeSummary ? checkpoint.seq : (closedKept[0]?.seq ?? checkpoint.seq)
   const stateRecords = []
   for (const type of STATE_TYPES) {
-    for (let index = cut - 1; index >= 0; index -= 1) {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if (events[index].seq >= firstKeptSeq) continue
       if (events[index].type === type) { stateRecords.push(events[index]); break }
     }
   }
   stateRecords.sort((left, right) => left.seq - right.seq)
 
-  const isCompaction = event => COMPACTION_TYPES.has(event.type)
-  const closedKept = closed.filter(event => !isCompaction(event))
-
   /** @type {{ event: object, originalSeq?: number }[]} */
   let records = []
   for (const event of stateRecords) records.push({ event, originalSeq: event.seq })
-  records.push({ event: checkpoint, originalSeq: checkpoint.seq, isCheckpoint: true })
+  if (includeSummary) records.push({ event: checkpoint, originalSeq: checkpoint.seq, isCheckpoint: true })
 
   let keptInterrupted = []
   let droppedOrphans = 0
-  if (includeInterruptedTurn) {
+  if (keepFragment) {
     // 片段开头可能落在被压缩掉的那个 step 的尾巴上（step/start 在压缩区内）：
     // 只从第一个完整的 step/start 开始接续，之前的半截 step 事件全部丢弃。
-    const filtered = interruptedRaw.filter(event => !isCompaction(event))
+    const filtered = interruptedRaw.filter(event => !isBookkeeping(event))
     const firstStepIndex = filtered.findIndex(event => event.type === 'step/start')
     const trimmed = firstStepIndex < 0 ? [] : filtered.slice(firstStepIndex)
     const repaired = dropOrphanResults(trimmed)
@@ -162,7 +188,7 @@ export function buildTailSeed(events, options = {}) {
 
   // 丢掉那半截时，压缩点所在 turn 既没有 turn/start 也没有 turn/end：
   // 保留它的 turn/step 会造出一个没有开头的轮次，索性让检查点成为一条无轮次归属的消息。
-  const checkpointLosesTurn = !includeInterruptedTurn || keptInterrupted.length === 0
+  const checkpointLosesTurn = keptInterrupted.length === 0
 
   // seq 重排：原 seq -> 新 seq
   const seqMap = new Map()
@@ -242,6 +268,8 @@ export function buildTailSeed(events, options = {}) {
       droppedOrphans,
       interruptedTurnEvents: keptInterrupted.length,
       droppedDevMessages,
+      keptTurns,
+      summaryKept: includeSummary,
       checkpointSeq: checkpoint.seq,
     },
   }
