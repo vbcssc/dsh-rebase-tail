@@ -1,0 +1,10 @@
+node_modules/
+*.log
+
+# 测试/调试产物
+.tmp/
+_artifacts/
+
+# 凭证
+.env
+.npmrc

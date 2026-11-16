@@ -1,0 +1,5 @@
+# dsh-rebase-tail 的 composition 层：往当前 profile 插入一行插件。
+# 安装这份 bundle 后，每个会话的指令面板里都会多出 /rebase-tail。
+- insert:
+    - id: dsh-rebase-tail
+      name: dsh-rebase-tail

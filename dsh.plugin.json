@@ -1,0 +1,14 @@
+{
+  "name": "dsh-rebase-tail",
+  "description": "把最近一次压缩之后的对话重建为新会话：压缩只遮住旧历史，分叉又复制整条前缀，这条命令两者都不用，直接把尾部搬进一个干净的新会话。",
+  "version": "0.1.1",
+  "entry": {
+    "name": "dsh-rebase-tail",
+    "inject": [
+      "commands",
+      "agents",
+      "sessions",
+      "sessionQuery"
+    ]
+  }
+}

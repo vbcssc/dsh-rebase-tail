@@ -1,0 +1,42 @@
+{
+  "name": "dsh-rebase-tail",
+  "version": "0.1.1",
+  "private": true,
+  "description": "斜杠命令 /rebase-tail：把「最近一次压缩之后」的对话重建为一个新会话，甩掉已压缩的历史包袱。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "session",
+    "compaction",
+    "fork",
+    "context"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./tail-seed": "./src/tail-seed.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
