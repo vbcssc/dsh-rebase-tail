@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## 0.2.0
+
+- 新增浏览器半边：输入框工具栏按钮「分切尾部」（权限控件右边，与「结构化」「周期提示」并排）。点开是一个弹窗——保留轮次 / 带上压缩摘要 / 接上没跑完的那一轮，三个控件对应原来的三个命令行开关，结果就地显示。
+- 宿主新增 `POST /plugins/dsh-rebase-tail/run`（同源校验 + 8KB 请求体上限）。按钮与斜杠命令共用同一个 `runRebase()`，不必两边各写一份。
+- `package.json` 声明 `dsh.client = { platform: 'web' }` 且 `exports["./client"] → src/client.js`，由宿主的 client-modules 发给浏览器。
+- 斜杠命令保留给脚本与键盘用户，行为不变。
+- 测试补 1 条：请求体校验（缺 `sessionId`、轮次 0 / 2.5 / 字符串都要拒绝，`turns: null` 等于不填）。
+
+## 0.1.4
+
+- 修：新会话打不开，报 `failed to project session …: invalid persisted inbox splice at session seq N`。原因是一直在搬宿主簿记事件——`agent/inbox/spliced` 的 `start`/`removedCount` 指的是**当时队列里的下标**，砍掉前半截后再折叠就越界（`job/*`、`llm/retry*`、`assistant/attempt`、`command/*` 同理，都是按位置或按成对关系折叠的）。
+- 改成白名单：只搬对话（`system/developer/user/assistant/message`、`tool/call`、`tool/result`、`request/header`、`request/context`）、结构（`turn/*`、`step/*`）与运行态（`permission/preset`、`sandbox/mode`、`approval/policy`、`model/selection`、`session/title`），其余一律不搬，`stats.droppedBookkeeping` 记账。
+- 副作用是好事：种子明显变小（一个 5862 条 / 3 轮的 PTC 会话，`--turns 3 --drop-summary` 从 142 条降到 93 条；默认从 492 降到 330），派生消息数不变，对话内容一条没少。
+- 测试补 1 条：簿记事件（队列拼接 / 任务注册结算 / 重试 / 尝试 / 命令卡 / 分叉标记）不搬且记账。
+
+## 0.1.3
+
+- 修：命令没声明 `input`，客户端不把 `/rebase-tail --turns 3` 当命令，而是当普通提问发给模型。现在声明了 `input.hint`，参数（`--turns N` / `--drop-summary` / `--drop-open-turn`）在输入框里直接可用，一行写全回车即执行。代价是不带参数的裸命令要按两次回车（第一次变成命令块，第二次执行），这是客户端 leadingInput 机制的固有流程。
+
 ## 0.1.2
 
 - 新增 `--turns N`：只保留压缩点之后最后 N 个完整轮次（默认全部保留）。

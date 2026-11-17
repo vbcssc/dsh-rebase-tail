@@ -1,12 +1,15 @@
 /**
- * /rebase-tail —— 把"最近一次压缩之后"的对话重建为一个新会话。
+ * dsh-rebase-tail —— 把"最近一次压缩之后"的对话重建为一个新会话。
  *
  * 动机：压缩只是把旧历史从模型可见面里遮住，日志本身仍然保留全部事件；
  * 分叉（session/fork）复制的也是整条前缀。于是一个跑过几十轮上千步的会话，
  * 无论分叉多少次都背着最初那份 200MB 级的日志。本插件把尾部真正搬进一个
  * 新会话：被压缩掉的事件不再出现在新会话的任何位置。
  *
- * 装配：host 平面插件（无客户端代码），注册一条斜杠命令。
+ * 两个入口共用同一个执行体 {@link runRebase}：
+ *  - 浏览器半边的工具栏按钮（src/client.js）走 {@link RUN_ROUTE}；
+ *  - 斜杠命令 /rebase-tail 走 commands 席位，留给脚本与键盘用户。
+ *
  * 依赖的宿主服务全部通过 ctx 取，不 import 任何 @deepseek-ai/* 包，
  * 因此插件目录不需要自己的 node_modules，也不会被 dsh 升级打断。
  * @module dsh-rebase-tail
@@ -17,13 +20,19 @@ import { buildTailSeed } from './tail-seed.js'
 
 export const name = 'dsh-rebase-tail'
 
+/** 浏览器半边提交执行请求的路径。两条半边靠这个字面量对齐。 */
+export const RUN_ROUTE = '/plugins/dsh-rebase-tail/run'
+
+/** 一次执行请求的请求体上限：只有几个标量字段。 */
+const MAX_BODY_BYTES = 8192
+
 const USAGE = '用法：/rebase-tail [--turns N] [--drop-summary] [--drop-open-turn]'
 const ERROR_TEXT = {
   'no-compaction': '这个会话还没有压缩点（没有 compaction/summary），没有包袱可甩。',
   'no-checkpoint': '最后一次压缩没有留下检查点消息，无法定位尾部起点。',
   'no-closed-turn': '压缩点之后没有任何完整结束的轮次，无法重建会话。',
-  'turn-open': '当前这一轮还没结束。等它跑完再执行 /rebase-tail。',
-  'bad-turns': '--turns 需要一个大于 0 的整数。',
+  'turn-open': '当前这一轮还没结束。等它跑完再分切。',
+  'bad-turns': '保留轮次需要一个大于 0 的整数。',
 }
 
 /**
@@ -31,7 +40,7 @@ const ERROR_TEXT = {
  * @param raw - 斜杠命令后面的原始文本。
  * @returns 选项，或 { error } 表示用法错误。
  */
-function parseArguments(raw) {
+export function parseArguments(raw) {
   const options = { includeInterruptedTurn: true, includeSummary: true, turns: undefined }
   const tokens = raw.split(/\s+/).filter(token => token.length > 0)
   for (let index = 0; index < tokens.length; index += 1) {
@@ -50,6 +59,24 @@ function parseArguments(raw) {
     return { error: USAGE }
   }
   return { options }
+}
+
+/**
+ * 校验浏览器半边提交的请求体，并换成内部的选项字面量。
+ * @param body - 已解析的 JSON 请求体。
+ * @returns 会话 id 与选项，或 { error } 表示请求不合法。
+ */
+export function parseRunBody(body) {
+  if (body === null || typeof body !== 'object') return { error: '请求体必须是一个 JSON 对象。' }
+  const sessionId = body.sessionId
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return { error: '缺少 sessionId。' }
+  const options = { includeInterruptedTurn: body.includeInterruptedTurn !== false, includeSummary: body.includeSummary !== false, turns: undefined }
+  if (body.turns !== undefined && body.turns !== null) {
+    const turns = body.turns
+    if (!Number.isSafeInteger(turns) || turns < 1) return { error: ERROR_TEXT['bad-turns'] }
+    options.turns = turns
+  }
+  return { sessionId, options }
 }
 
 /** 最后一个 model/selection 记录的路线，用作新会话的初始路线。 */
@@ -76,7 +103,7 @@ function compositionFor(ctx, session) {
   return {
     presetId: current,
     setup: async (agentCtx) => {
-      // 会话记录的 preset 可能已经被删除或改名：退回默认 preset，而不是让整条命令失败。
+      // 会话记录的 preset 可能已经被删除或改名：退回默认 preset，而不是让整次分切失败。
       let resolved
       try {
         resolved = await presets.resolve(current)
@@ -105,27 +132,25 @@ async function attachWorkspace(ctx, parentSessionId, childSessionId) {
 }
 
 /**
- * 执行一次 /rebase-tail。
- * @param ctx - 命令所在上下文。
- * @param invocation - 命令调用。
- * @returns 命令结果。
+ * 把一个会话的压缩点之后的对话重建为新会话。
+ * @param ctx - 已注入 agents/sessions/sessionQuery 的上下文。
+ * @param parent - 源会话。
+ * @param options - buildTailSeed 的选项。
+ * @param signal - 可选的中止信号（斜杠命令带过来的）。
+ * @returns {Promise<{ ok: boolean, text: string, childSessionId?: string, stats?: object }>}
  */
-async function execute(ctx, invocation) {
-  const parsed = parseArguments(invocation.rawInput.trim())
-  if (parsed.error !== undefined) return { kind: 'error', text: parsed.error }
-
-  const parent = invocation.agent.session
-  const observation = await ctx.sessionQuery.observeSession(parent.id, { signal: invocation.signal })
+export async function runRebase(ctx, parent, options, signal) {
+  const observation = await ctx.sessionQuery.observeSession(parent.id, { signal })
   try {
-    const built = buildTailSeed(observation.events, parsed.options)
+    const built = buildTailSeed(observation.events, options)
     if (built.error === 'not-enough-turns') {
       return {
-        kind: 'error',
+        ok: false,
         text: '压缩点之后只有 ' + String(built.detail?.available ?? 0) + ' 个完整轮次，保留不了 '
           + String(built.detail?.requested ?? 0) + ' 个。',
       }
     }
-    if (built.error !== undefined) return { kind: 'error', text: ERROR_TEXT[built.error] ?? built.error }
+    if (built.error !== undefined) return { ok: false, text: ERROR_TEXT[built.error] ?? built.error }
 
     const header = observation.header
     const selection = lastSelection(observation.events) ?? ctx.get('agentDefaultModel')?.currentSelection()
@@ -145,7 +170,9 @@ async function execute(ctx, invocation) {
 
     const stats = built.stats
     return {
-      kind: 'success',
+      ok: true,
+      childSessionId,
+      stats,
       text: '已建好尾部会话 ' + childSessionId
         + '：' + String(stats.sourceEvents) + ' 条事件 -> ' + String(stats.seedEvents) + ' 条'
         + '（压缩点之后 ' + String(stats.keptTurns) + ' 个完整轮次'
@@ -161,8 +188,65 @@ async function execute(ctx, invocation) {
   }
 }
 
+/** 回一个 JSON 响应。 */
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload)
+  res.statusCode = status
+  res.setHeader('content-type', 'application/json; charset=utf-8')
+  res.setHeader('cache-control', 'no-store')
+  res.setHeader('content-length', String(Buffer.byteLength(body)))
+  res.end(body)
+}
+
+/** 读 JSON 请求体；超限时停止累积并报错。 */
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    let overflowed = false
+    const chunks = []
+    req.on('data', (chunk) => {
+      if (overflowed) return
+      size += chunk.length
+      if (size > MAX_BODY_BYTES) {
+        overflowed = true
+        chunks.length = 0
+        reject(new Error('请求体过大'))
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('error', reject)
+    req.on('end', () => {
+      if (overflowed) return
+      const raw = Buffer.concat(chunks).toString('utf8').trim()
+      if (raw.length === 0) {
+        resolve({})
+        return
+      }
+      try {
+        resolve(JSON.parse(raw))
+      } catch (error) {
+        reject(new Error('请求体不是合法 JSON：' + String(error?.message ?? error)))
+      }
+    })
+  })
+}
+
+/** 只接受同源写请求：别的站点不能借浏览器把你的会话切开。 */
+function isTrustedWrite(req) {
+  const headers = req.headers ?? {}
+  if (String(headers['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') return false
+  const origin = String(headers.origin ?? '')
+  if (origin.length === 0) return true
+  try {
+    return new URL(origin).host === String(headers.host ?? '')
+  } catch {
+    return false
+  }
+}
+
 /**
- * 注册 /rebase-tail。
+ * 注册 /rebase-tail 与浏览器半边的执行路由。
  * @param ctx - 宿主上下文。
  */
 export function apply(ctx) {
@@ -171,9 +255,53 @@ export function apply(ctx) {
       () => scoped.commands.register({
         name: 'rebase-tail',
         description: '把最近一次压缩之后的对话作为新会话（甩掉已压缩的历史包袱）',
-        handler: invocation => execute(scoped, invocation),
+        // 声明 input 才能让客户端把 /rebase-tail 后面的文字当成参数（leadingInput claim）；
+        // 不声明时，带参数的一行会被当成普通提问发给模型。
+        input: { hint: '--turns N ｜ --drop-summary ｜ --drop-open-turn' },
+        handler: async (invocation) => {
+          const parsed = parseArguments(invocation.rawInput.trim())
+          if (parsed.error !== undefined) return { kind: 'error', text: parsed.error }
+          const result = await runRebase(scoped, invocation.agent.session, parsed.options, invocation.signal)
+          return { kind: result.ok ? 'success' : 'error', text: result.text }
+        },
       }),
       'rebase-tail command',
     )
+
+    // 冷启动时 webServer 通常晚于本插件就绪，且 headless/TUI 装配里根本没有它：
+    // 用 ctx.inject 等它就绪，拿不到就只是没有按钮那条路，命令照旧可用。
+    scoped.inject(['webServer'], (served) => served.effect(
+      () => served.webServer.register({
+        kind: 'exact',
+        path: RUN_ROUTE,
+        handler: async (req, res) => {
+          if (!isTrustedWrite(req)) {
+            sendJson(res, 403, { ok: false, text: '跨站请求已拒绝。' })
+            return
+          }
+          if (String(req.method ?? 'GET').toUpperCase() !== 'POST') {
+            sendJson(res, 405, { ok: false, text: '只接受 POST。' })
+            return
+          }
+          const parsed = parseRunBody(await readJsonBody(req).catch(error => ({ error: String(error?.message ?? error) })))
+          if (parsed.error !== undefined) {
+            sendJson(res, 400, { ok: false, text: parsed.error })
+            return
+          }
+          const session = served.sessions.get(parsed.sessionId)
+          if (session === undefined) {
+            sendJson(res, 409, { ok: false, text: '这个会话当前没有在运行，先发一条消息让它活起来再分切。' })
+            return
+          }
+          try {
+            sendJson(res, 200, await runRebase(served, session, parsed.options))
+          } catch (error) {
+            served.logger?.warn?.('rebase-tail: 分切失败：' + String(error))
+            sendJson(res, 500, { ok: false, text: '分切失败：' + String(error?.message ?? error) })
+          }
+        },
+      }),
+      'rebase-tail run route',
+    ))
   })
 }

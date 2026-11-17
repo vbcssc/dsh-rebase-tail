@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildTailSeed } from '../src/tail-seed.js'
+import { parseArguments, parseRunBody } from '../src/index.js'
 
 const turnStart = (seq, turn) => ({ type: 'turn/start', seq, time: seq, data: { turn } })
 const stepStart = (seq, turn, step) => ({ type: 'step/start', seq, time: seq, data: { turn, step } })
@@ -270,4 +271,64 @@ test('别人的分叉标记不跟着搬：session/end-seed 丢弃', () => {
   assert.equal(built.error, undefined)
   assert.equal(built.seed.some(event => event.type === 'session/end-seed'), false)
   assertSelfConsistent(built.seed)
+})
+
+test('命令行参数：三个开关与 --turns 的两种写法', () => {
+  assert.deepEqual(parseArguments(''), { options: { includeInterruptedTurn: true, includeSummary: true, turns: undefined } })
+  assert.deepEqual(parseArguments('--drop-open-turn').options, { includeInterruptedTurn: false, includeSummary: true, turns: undefined })
+  assert.deepEqual(parseArguments('--drop-summary').options, { includeInterruptedTurn: true, includeSummary: false, turns: undefined })
+  assert.equal(parseArguments('--turns 3').options.turns, 3)
+  assert.equal(parseArguments('--turns=7').options.turns, 7)
+  assert.equal(parseArguments('--turns 3 --drop-summary').options.includeSummary, false)
+  assert.equal(parseArguments('--turns 3 --drop-open-turn').options.includeInterruptedTurn, false)
+  assert.equal(parseArguments('--turns').error !== undefined, true, '缺数字要报用法')
+  assert.equal(parseArguments('--turns 0').error !== undefined, true)
+  assert.equal(parseArguments('--turns abc').error !== undefined, true)
+  assert.equal(parseArguments('--nope').error !== undefined, true)
+  assert.equal(parseArguments('3').error !== undefined, true)
+})
+
+test('宿主簿记事件不搬：队列拼接、任务注册、命令卡、分叉标记', () => {
+  const events = fixture()
+  const extra = [
+    { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } },
+    { type: 'job/registered', data: { jobId: 'j1' } },
+    { type: 'job/settled', data: { jobId: 'j1' } },
+    { type: 'llm/retry', data: { attempt: 2 } },
+    { type: 'assistant/attempt', data: { stream: {} } },
+    { type: 'command/run', data: { commandId: 'c1', name: 'compact' } },
+    { type: 'command/done', data: { commandId: 'c1', kind: 'success' } },
+    { type: 'session/end-seed', data: { inherited: true } },
+  ]
+  // 把它们塞进第二个完整轮次里
+  events.splice(23, 0, ...extra)
+  events.forEach((event, index) => { event.seq = index })
+  const built = buildTailSeed(events)
+  assert.equal(built.error, undefined)
+  assertSelfConsistent(built.seed)
+  for (const type of ['agent/inbox/spliced', 'job/registered', 'job/settled', 'llm/retry', 'assistant/attempt', 'command/run', 'command/done', 'session/end-seed']) {
+    assert.equal(built.seed.some(event => event.type === type), false, type + ' 不该搬过去')
+  }
+  assert.ok(built.stats.droppedBookkeeping >= 8, '要记账丢了多少条')
+  // 对话本身不能丢
+  assert.equal(built.seed.filter(event => event.type === 'user/message').length, 2)
+})
+
+
+test('浏览器半边的请求体：缺 sessionId、轮次不合法都要拒绝', () => {
+  assert.deepEqual(parseRunBody({ sessionId: 'session-x' }), {
+    sessionId: 'session-x',
+    options: { includeInterruptedTurn: true, includeSummary: true, turns: undefined },
+  })
+  assert.deepEqual(parseRunBody({ sessionId: 'session-x', turns: 3, includeSummary: false, includeInterruptedTurn: false }), {
+    sessionId: 'session-x',
+    options: { includeInterruptedTurn: false, includeSummary: false, turns: 3 },
+  })
+  // 空串轮次等于"不填"，走全部完整轮次
+  assert.equal(parseRunBody({ sessionId: 'session-x', turns: null }).options.turns, undefined)
+  assert.match(parseRunBody({}).error, /sessionId/)
+  assert.match(parseRunBody(null).error, /JSON/)
+  assert.match(parseRunBody({ sessionId: 'session-x', turns: 0 }).error, /整数/)
+  assert.match(parseRunBody({ sessionId: 'session-x', turns: 2.5 }).error, /整数/)
+  assert.match(parseRunBody({ sessionId: 'session-x', turns: '3' }).error, /整数/)
 })

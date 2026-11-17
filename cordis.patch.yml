@@ -1,5 +1,8 @@
 # dsh-rebase-tail 的 composition 层：往当前 profile 插入一行插件。
-# 安装这份 bundle 后，每个会话的指令面板里都会多出 /rebase-tail。
+#
+# 这一行同时挂起两半：host 半边（执行分切、注册 /rebase-tail、提供执行路由）与
+# 浏览器半边（package.json 里的 `dsh.client` 指向 ./src/client.js，由 client-modules
+# 发给浏览器，在输入框工具栏与权限控件右边渲染「分切尾部」按钮）。
 - insert:
     - id: dsh-rebase-tail
       name: dsh-rebase-tail

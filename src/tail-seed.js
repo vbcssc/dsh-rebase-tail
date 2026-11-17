@@ -19,6 +19,20 @@ const SURFACE_TYPES = new Set(['system/message', 'developer/message', 'user/mess
 const COMPACTION_TYPES = new Set(['compaction/start', 'compaction/summary', 'compaction/end'])
 /** 从旧日志头部继承的运行态设置（各自取最后一次）。 */
 const STATE_TYPES = ['permission/preset', 'sandbox/mode', 'approval/policy', 'model/selection', 'session/title']
+/**
+ * 能搬进新会话的事件类型（白名单）。
+ *
+ * 只搬"对话 + 轮次/步骤结构"：其余都是宿主簿记，跟着搬会出事——它们要么按位置折叠
+ * （agent/inbox/spliced 的 start/removedCount 指的是当时队列里的下标，切掉前半截后再折叠
+ * 就越界：invalid persisted inbox splice），要么按成对关系折叠（job 注册/结算、llm 重试、
+ * 审批/提问问答）。新会话从零重建，把这些丢掉既是安全的也是正确的。
+ */
+const KEEP_TYPES = new Set([
+  ...SURFACE_TYPES,
+  'tool/call', 'request/header', 'request/context',
+  'turn/start', 'turn/end', 'step/start', 'step/end',
+  ...STATE_TYPES,
+])
 
 /** 事件携带的 turn 号，或 undefined。 */
 function turnOf(event) {
@@ -115,9 +129,9 @@ export function buildTailSeed(events, options = {}) {
     closedFrom = turnStarts[turnStarts.length - keepTurns]
   }
 
-  // 压缩事务与 session/end-seed 都是簿记事件：新会话不该继承别人的分叉标记。
-  const isBookkeeping = event => COMPACTION_TYPES.has(event.type) || event.type === 'session/end-seed'
-  const closedKept = closed.slice(closedFrom).filter(event => !isBookkeeping(event))
+  const window = closed.slice(closedFrom)
+  const closedKept = window.filter(event => KEEP_TYPES.has(event.type))
+  const droppedBookkeeping = window.length - closedKept.length
   // 不带摘要时也不接那半截：没有摘要打底，孤立的后半截读不出上下文。
   const keepFragment = includeInterruptedTurn && includeSummary && keepTurns === undefined
   const keptTurns = closedKept.filter(event => event.type === 'turn/start').length
@@ -144,7 +158,7 @@ export function buildTailSeed(events, options = {}) {
   if (keepFragment) {
     // 片段开头可能落在被压缩掉的那个 step 的尾巴上（step/start 在压缩区内）：
     // 只从第一个完整的 step/start 开始接续，之前的半截 step 事件全部丢弃。
-    const filtered = interruptedRaw.filter(event => !isBookkeeping(event))
+    const filtered = interruptedRaw.filter(event => KEEP_TYPES.has(event.type))
     const firstStepIndex = filtered.findIndex(event => event.type === 'step/start')
     const trimmed = firstStepIndex < 0 ? [] : filtered.slice(firstStepIndex)
     const repaired = dropOrphanResults(trimmed)
@@ -270,6 +284,7 @@ export function buildTailSeed(events, options = {}) {
       droppedDevMessages,
       keptTurns,
       summaryKept: includeSummary,
+      droppedBookkeeping,
       checkpointSeq: checkpoint.seq,
     },
   }
