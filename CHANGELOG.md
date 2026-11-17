@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.3.1
+
+- 修：分切出来的会话**用一次之后就打不开**（冷启动报 `stored log is corrupt: SessionFormatError: system/message requires a protected first surface head`）。根因是种子的 surface 从摘要那条 user/message 开始：agent-loop 在第一轮会往 surface 追加一条 system/message（`SystemPromptProjection.project` 找不到任何 system 节点时就是追加），而服务端校验要求"日志里一旦有 system/message，surface 的 0 号节点必须是它"。创建和继续用都不校验这条，只有重新打开日志时才校验，所以症状是"重启后历史加载失败"。
+- 现在种子自带一段自成一轮的头部：`turn/start → step/start → system/message → step/end → turn/end`，摘要归这一轮，搬来的事件从第 2 轮起。那条 system/message 是过渡性的——agent-loop 每个 step 都会把 0 号节点替换成真正的系统提示，第一次请求之后它就没了。
+- 新增 `tools/repair-head.mjs`：给 0.3.0 及更早分切出来的会话补头部。重排 seq、turn 号与全部引用（surfaceOp / sourceEventSeqs / headerSeq / messageSeqs / shadowedRange…），对话内容不动，写回前备份 `.bak`，并保持"首帧恰好是头部行"的多帧 zstd 格式。
+- 测试补 1 条（surface 头必须是 system/message，覆盖四种参数组合）。真机验证：4 组真实日志的种子在"追加一条 live system/message"之后通过 v4 关系校验，去掉头部那条就复现同一个报错；两个线上坏会话修好后经真持久化层冷读通过（793 / 98 条事件）。
+
 ## 0.3.0
 
 - 新增：弹窗里可以给新会话起名。输入框在「保留轮次」上面（打开弹窗时自动聚焦），留空＝旧标题 +「 · 尾部会话」，最多 80 字（输入框 `maxlength` + 宿主再校验一次）。

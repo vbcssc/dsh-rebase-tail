@@ -1,6 +1,6 @@
 {
   "name": "dsh-rebase-tail",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "输入框工具栏按钮「分切尾部」：把「最近一次压缩之后」的对话重建为一个新会话，甩掉已压缩的历史包袱。另附等价的 /rebase-tail 命令。",
   "keywords": [
@@ -23,6 +23,7 @@
   },
   "files": [
     "src",
+    "tools",
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",

@@ -25,6 +25,20 @@ const SURFACE_TYPES = new Set(['system/message', 'developer/message', 'user/mess
  * 那条看得见的对话。
  */
 const SUMMARY_HEADER = '【压缩摘要】以下是旧会话压缩点之前那段对话的自动回顾。'
+/**
+ * 新会话里那块"分切说明"系统消息。
+ *
+ * 服务端校验要求：日志里一旦出现 system/message，surface 的 0 号节点必须就是它
+ * （session-format-v3-to-v4 的 "system/message requires a protected first surface head"）。
+ * 而 agent-loop 在 surface 里找不到任何 system/message 时，会在新会话第一轮**追加**一条，
+ * 那条追加必然落在 summary 之后，于是整条日志在冷启动时被判定为损坏——分切出来的会话用一次
+ * 就再也打不开。所以种子自己带一个 0 号 system 节点占住位置。
+ *
+ * 这段文字是过渡性的：agent-loop 的 SystemPromptProjection 在每个 step 都会把 0 号节点
+ * 替换成真正的系统提示，第一次请求之后它就消失了。 */
+const HEAD_NOTE = '这一轮的上下文来自旧会话压缩点之后的部分，压缩点之前的对话不在本会话里。'
+/** 那条系统消息的消息 id：日志里唯一即可，取值固定便于比对。 */
+const HEAD_MESSAGE_ID = 'rebase-tail-head'
 
 const COMPACTION_TYPES = new Set(['compaction/start', 'compaction/summary', 'compaction/end'])
 /** 从旧日志头部继承的运行态设置（各自取最后一次）。 */
@@ -177,7 +191,33 @@ export function buildTailSeed(events, options = {}) {
   /** @type {{ event: object, originalSeq?: number }[]} */
   let records = []
   for (const event of stateRecords) records.push({ event, ...(synthetic.has(event) ? {} : { originalSeq: event.seq }) })
-  if (includeSummary) records.push({ event: checkpoint, originalSeq: checkpoint.seq, isCheckpoint: true })
+  // 自成一轮的头部：system 占住 surface 的 0 号节点（见 HEAD_NOTE），摘要归它这一轮。
+  const headEvent = (type, data, surfaceOp) => {
+    const event = { type, seq: -1, time: checkpoint.time, data }
+    if (surfaceOp !== undefined) event.surfaceOp = surfaceOp
+    return event
+  }
+  const head = [
+    { event: headEvent('turn/start', { turn: 1 }), synthetic: true },
+    { event: headEvent('step/start', { turn: 1, step: 1 }), synthetic: true },
+    {
+      event: headEvent('system/message', {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'system',
+          content: [{ type: 'text', text: HEAD_NOTE }],
+          source: { kind: 'system-prompt' },
+          id: HEAD_MESSAGE_ID,
+        },
+      }, 'append'),
+      synthetic: true,
+    },
+  ]
+  if (includeSummary) head.push({ event: checkpoint, originalSeq: checkpoint.seq, isCheckpoint: true, inHead: true })
+  head.push({ event: headEvent('step/end', { turn: 1, step: 1 }), synthetic: true })
+  head.push({ event: headEvent('turn/end', { turn: 1, reason: { kind: 'completed' } }), synthetic: true })
+  records.push(...head)
 
   let keptInterrupted = []
   let droppedOrphans = 0
@@ -226,18 +266,14 @@ export function buildTailSeed(events, options = {}) {
     return false
   })
 
-  // 丢掉那半截时，压缩点所在 turn 既没有 turn/start 也没有 turn/end：
-  // 保留它的 turn/step 会造出一个没有开头的轮次，索性让检查点成为一条无轮次归属的消息。
-  const checkpointLosesTurn = keptInterrupted.length === 0
-
   // seq 重排：原 seq -> 新 seq
   const seqMap = new Map()
   records.forEach((record, index) => {
     if (record.originalSeq !== undefined) seqMap.set(record.originalSeq, index)
   })
 
-  // turn / step 重排（丢掉轮次归属的检查点不参与取值，否则会留下空号）
-  const numbered = records.filter(record => !(record.isCheckpoint === true && checkpointLosesTurn))
+  // turn / step 重排：合成头部与检查点不参与取值（否则会留下空号或撞号），搬来的事件从第 2 轮起
+  const numbered = records.filter(record => record.synthetic !== true && record.isCheckpoint !== true)
   const turns = numbered.map(record => turnOf(record.event)).filter(turn => turn !== undefined)
   const turnBase = turns.length > 0 ? Math.min(...turns) : 0
   const stepFloor = new Map()
@@ -252,17 +288,19 @@ export function buildTailSeed(events, options = {}) {
   const seed = records.map((record, index) => {
     const clone = JSON.parse(JSON.stringify(record.event))
     clone.seq = index
-    if (record.isCheckpoint === true && checkpointLosesTurn) {
-      delete clone.data?.turn
-      delete clone.data?.step
-    }
-    const turn = turnOf(clone)
-    if (turn !== undefined) clone.data.turn = turn - turnBase + 1
-    const remappedTurn = turnOf(clone)
-    const step = stepOf(clone)
-    if (step !== undefined && remappedTurn !== undefined) {
-      const floor = stepFloor.get(turn)
-      if (floor !== undefined) clone.data.step = step - floor + 1
+    if (record.isCheckpoint === true) {
+      // 摘要归头部那一轮：turn 1 / step 1 由头部占着。
+      clone.data.turn = 1
+      clone.data.step = 1
+    } else if (record.synthetic !== true) {
+      const turn = turnOf(clone)
+      if (turn !== undefined) clone.data.turn = turn - turnBase + 2
+      const remappedTurn = turnOf(clone)
+      const step = stepOf(clone)
+      if (step !== undefined && remappedTurn !== undefined) {
+        const floor = stepFloor.get(turn)
+        if (floor !== undefined) clone.data.step = step - floor + 1
+      }
     }
     if (SURFACE_TYPES.has(clone.type)) {
       const op = clone.surfaceOp

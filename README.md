@@ -103,10 +103,32 @@ pnpm add link:D:/docker_and_big_models/开源仓库-分析区/dsh-rebase-tail
 
 离线不变量检查（`node --test` 覆盖合成日志；真实日志另做一次性核对）：`seq` 连续、surface 替换引用全部指向更早的 `seq`、`turn` 从 1 且连续、每轮 `step` 从 1 且连续、每个 `step/end` 都有配对、无孤儿 `tool/result`、无 `compaction/*` 残留；投影物化（`sessionProjections.snapshot`，即打开会话时那一步）在 6 份真实日志 × 9 组参数上全部通过。
 
+## 故障恢复：旧会话打不开
+
+0.3.0 及更早分切出来的会话，用了一次之后（或重启后）打开会报：
+
+```
+历史加载失败：stored session "session-…" is corrupt:
+  SessionFormatError: system/message requires a protected first surface head
+```
+
+修复（不删对话，只补一个占住 surface 0 号节点的 system 头，并把 seq / turn 号与所有引用整体后移）：
+
+```sh
+node tools/repair-head.mjs "<...>/session.v4.jsonl.zstd"           # 先看它打算做什么
+node tools/repair-head.mjs "<...>/session.v4.jsonl.zstd" --write   # 备份成 .bak 再改
+```
+
+不需要任何 dsh 依赖，只用 Node 自带 `zlib` 的 zstd（Node ≥ 22.15）。写回时保持「第一帧恰好是头部那一行」
+的多帧格式——整段重压成一个帧会被判定为 `first frame is not exactly one header line`。
+
 ## 已知边界
 
 - **压缩摘要就是新会话最前面那条 user 消息**：正文前多一行 `【压缩摘要】以下是旧会话压缩点之前那段对话的自动回顾。`，其余原样（`This is an automatically generated checkpoint …` 那段开场、9KB 级正文、`</compacted-summary>` 收尾）。它同时是模型可见上下文的一部分；取消勾选「带上压缩摘要」则整条不带。
-- **新会话里的下一轮对话没有测过**：验证只到「模型可见请求构造正确 + 会话能渲染/恢复」。
+- **0.3.0 及更早分切出来的会话要修一次**：它们用一次之后冷启动会报 `system/message requires a protected
+  first surface head`（原因与修法见上一节）。0.3.1 起种子自带 system 头，新分切出来的不会再这样。
+- **没跑过带模型的完整对话**：验证到「模型可见请求构造正确 + 追加一轮之后整条日志仍通过 v4 关系校验 +
+  冷读能打开 + 会话能渲染」，没有真花 token 让模型回答一轮。
 - 压缩点所在 turn 的后半截里若出现 `/compact`、图片 offload、tool-result 裁剪等**跨切点替换**事件，当前策略一律降级为 `append`。
 - preset 必须在该宿主里存在，否则会话本身就无法恢复（`Unknown agent preset`）——与插件无关，但会让按钮无处可点。
 - 按钮只在 Web / Electron 客户端出现；headless、TUI、ACP 装配里没有这个槽位，用斜杠命令。

@@ -135,10 +135,15 @@ test('压缩点之后重建尾部：起点是摘要、继承运行态、丢掉�
 
   assert.deepEqual(seed.slice(0, 3).map(event => event.type),
     ['permission/preset', 'session/title', 'model/selection'], '运行态取旧日志里的最后一次，放在头部')
-  assert.equal(seed[3].type, 'user/message')
-  assert.equal(seed[3].surfaceOp, 'append', '被遮住的历史正好是要丢的部分，替换降级为追加')
-  assert.equal(seed[3].data.content[1].text, '模型写的摘要')
-  assert.match(seed[3].data.content[0].text, /【压缩摘要】/, '摘要前置一段说明，前台才看得见它是什么')
+  assert.deepEqual(seed.slice(3, 6).map(event => event.type), ['turn/start', 'step/start', 'system/message'],
+    '头部自成一轮，system/message 占住 surface 的 0 号节点')
+  assert.equal(seed[5].data.message.role, 'system')
+  assert.deepEqual(seed.slice(7, 9).map(event => event.type), ['step/end', 'turn/end'], '头部这一轮自己收口')
+  assert.equal(seed[6].type, 'user/message')
+  assert.equal(seed[6].surfaceOp, 'append', '被遮住的历史正好是要丢的部分，替换降级为追加')
+  assert.equal(seed[6].data.turn, 1, '摘要归头部那一轮')
+  assert.equal(seed[6].data.content[1].text, '模型写的摘要')
+  assert.match(seed[6].data.content[0].text, /【压缩摘要】/, '摘要前置一段说明，前台才看得见它是什么')
 
   assert.equal(seed.some(event => event.type.startsWith('compaction/')), false, '不保留 compression 事务事件')
   assert.equal(seed.some(event => event.type === 'workspace/changes'), false, 'turn/end 之后的簿记事件丢弃')
@@ -151,16 +156,14 @@ test('压缩点之后重建尾部：起点是摘要、继承运行态、丢掉�
 
 test('压缩点所在 turn 的后半截：合成 turn/start，turn/step 从 1 重排', () => {
   const { seed } = buildTailSeed(fixture())
-  const synthetic = seed[4]
+  const synthetic = seed[9]
   assert.equal(synthetic.type, 'turn/start')
-  assert.equal(synthetic.data.turn, 1)
-  const afterCheckpoint = seed.slice(4).filter(event => typeof event.data?.turn === 'number')
-  assert.deepEqual([...new Set(afterCheckpoint.map(event => event.data.turn))], [1, 2], '只剩后半截 turn 与之后的完整轮次')
-  // turn 2 只剩 step 2，重排后必须变成 step 1
-  // 检查点自己占住 turn 1 / step 1，后半截的 step 2 重排后仍是 2（顺序不乱）
-  assert.equal(seed[3].data.step, 1)
-  const keptStep = afterCheckpoint.find(event => event.type === 'step/start' && event.data.turn === 1)
-  assert.equal(keptStep.data.step, 2)
+  assert.equal(synthetic.data.turn, 2, '头部占了 turn 1，后半截接着排 turn 2')
+  const copied = seed.slice(9).filter(event => typeof event.data?.turn === 'number')
+  assert.deepEqual([...new Set(copied.map(event => event.data.turn))], [2, 3], '后半截 turn 与之后的完整轮次')
+  // 后半截原本只剩 step 2：它自己那一轮的 step 从 1 重排
+  const keptStep = copied.find(event => event.type === 'step/start' && event.data.turn === 2)
+  assert.equal(keptStep.data.step, 1)
 })
 
 test('--drop-open-turn：只保留压缩点之后完整结束的轮次', () => {
@@ -170,10 +173,11 @@ test('--drop-open-turn：只保留压缩点之后完整结束的轮次', () => {
   assert.equal(built.stats.interruptedTurnEvents, 0)
   assert.equal(built.seed.some(event => event.type === 'tool/result' && event.data.message.source.callId === 'Z'), false)
   const turns = [...new Set(built.seed.map(event => event.data?.turn).filter(turn => typeof turn === 'number'))]
-  assert.deepEqual(turns.sort((left, right) => left - right), [1], '只剩一个完整轮次，重排为 turn 1')
-  assert.equal(built.seed[3].type, 'user/message')
-  assert.equal(built.seed[3].data.turn, undefined, '检查点不再属于任何轮次')
-  assert.equal(built.seed[4].type, 'turn/start')
+  assert.deepEqual(turns.sort((left, right) => left - right), [1, 2], '头部一轮 + 最后一个完整轮次')
+  assert.equal(built.seed[6].type, 'user/message')
+  assert.equal(built.seed[6].data.turn, 1, '检查点归头部那一轮')
+  assert.equal(built.seed[9].type, 'turn/start')
+  assert.equal(built.seed[9].data.turn, 2)
 })
 
 test('标题加上尾部会话后缀，并清空指向旧消息的引用', () => {
@@ -251,8 +255,8 @@ test('--turns N：只保留压缩点之后最后 N 个完整轮次', () => {
   assert.equal(built.stats.interruptedTurnEvents, 0, '指定轮次时不接被打断的那半截')
   assert.equal(built.stats.summaryKept, true)
   const turnsSeen = [...new Set(built.seed.map(event => event.data?.turn).filter(turn => typeof turn === 'number'))]
-  assert.deepEqual(turnsSeen.sort((left, right) => left - right), [1], '最后一个完整轮次重排为 turn 1')
-  assert.equal(built.seed.filter(event => event.type === 'turn/start').length, 1)
+  assert.deepEqual(turnsSeen.sort((left, right) => left - right), [1, 2], '头部一轮 + 最后一个完整轮次')
+  assert.equal(built.seed.filter(event => event.type === 'turn/start').length, 2)
 })
 
 test('--drop-summary：不带压缩摘要，从第一个完整轮次开始', () => {
@@ -356,9 +360,9 @@ test('压缩摘要在新会话最前面作为普通用户消息出现', () => {
   assert.equal(first.data.source.kind, 'user')
   assert.match(first.data.content[0].text, /【压缩摘要】/)
   assert.equal(first.data.content[1].text, '模型写的摘要')
-  // 它前面只有搬过来的运行态记录，没有任何对话：摘要就是新会话的第一条内容。
+  // 它前面只有搬过来的运行态记录和"分切说明"那一轮：摘要就是新会话的第一条对话内容。
   assert.deepEqual(built.seed.slice(0, first.seq).map(event => event.type),
-    ['permission/preset', 'session/title', 'model/selection'])
+    ['permission/preset', 'session/title', 'model/selection', 'turn/start', 'step/start', 'system/message'])
   // 摘要本身不能被改写
   assert.equal(built.seed.filter(event => event.type === 'user/message').length, 2)
 })
@@ -408,4 +412,20 @@ test('名称的收敛规则：空白折叠、去首尾空白、超长拒绝、�
   assert.deepEqual(parseArguments('--turns 3 --title 我的 尾部').options, {
     includeInterruptedTurn: true, includeSummary: true, turns: 3, title: '我的 尾部',
   })
+})
+
+test('头部的 system/message 必须占住 surface 的 0 号节点（否则冷启动判定日志损坏）', () => {
+  for (const options of [{}, { includeInterruptedTurn: false }, { turns: 1 }, { includeSummary: false }]) {
+    const built = buildTailSeed(fixture(), options)
+    assert.equal(built.error, undefined)
+    const surfaceTypes = new Set(['system/message', 'developer/message', 'user/message', 'assistant/message', 'tool/result'])
+    const firstSurface = built.seed.find(event => surfaceTypes.has(event.type))
+    assert.equal(firstSurface.type, 'system/message',
+      'surface 头必须是 system/message：' + JSON.stringify(options))
+  }
+  // 没摘要时头部只剩 system/message，那一轮依然自洽
+  const noSummary = buildTailSeed(fixture(), { includeSummary: false })
+  assert.deepEqual(noSummary.seed.slice(3, 8).map(event => event.type),
+    ['turn/start', 'step/start', 'system/message', 'step/end', 'turn/end'])
+  assertSelfConsistent(noSummary.seed)
 })
