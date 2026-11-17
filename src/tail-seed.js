@@ -98,6 +98,8 @@ export function buildTailSeed(events, options = {}) {
   const includeSummary = options.includeSummary !== false
   const keepTurns = typeof options.turns === 'number' && Number.isFinite(options.turns) ? Math.floor(options.turns) : undefined
   if (keepTurns !== undefined && keepTurns < 1) return { error: 'bad-turns' }
+  // 用户给新会话起的名字：给了就整条照用（不再拼" · 尾部会话"），没给才用旧标题加后缀。
+  const customTitle = typeof options.title === 'string' && options.title.trim().length > 0 ? options.title.trim() : undefined
 
   let lastSummary = -1
   for (let index = 0; index < events.length; index += 1) {
@@ -157,10 +159,24 @@ export function buildTailSeed(events, options = {}) {
     }
   }
   stateRecords.sort((left, right) => left.seq - right.seq)
+  // 旧日志没有可继承的标题（或它在切点之后）时，用户给的名字需要一条自己的 session/title：
+  // 否则新会话在列表里只能显示"未命名"。合成的事件不进 seqMap，它不是旧日志里的事件。
+  const synthetic = new Set()
+  if (customTitle !== undefined && !stateRecords.some(event => event.type === 'session/title')) {
+    const titleEvent = {
+      type: 'session/title',
+      seq: firstKeptSeq,
+      time: checkpoint.time,
+      data: { title: customTitle, messageSeqs: [], source: { kind: 'user' } },
+    }
+    synthetic.add(titleEvent)
+    stateRecords.push(titleEvent)
+    stateRecords.sort((left, right) => left.seq - right.seq)
+  }
 
   /** @type {{ event: object, originalSeq?: number }[]} */
   let records = []
-  for (const event of stateRecords) records.push({ event, originalSeq: event.seq })
+  for (const event of stateRecords) records.push({ event, ...(synthetic.has(event) ? {} : { originalSeq: event.seq }) })
   if (includeSummary) records.push({ event: checkpoint, originalSeq: checkpoint.seq, isCheckpoint: true })
 
   let keptInterrupted = []
@@ -284,7 +300,8 @@ export function buildTailSeed(events, options = {}) {
     if (clone.type === 'session/title') {
       clone.data.messageSeqs = []
       clone.data.source = { kind: 'user' }
-      clone.data.title = String(clone.data.title ?? 'untitled').replace(/\s*·\s*尾部会话$/, '') + ' · 尾部会话'
+      clone.data.title = customTitle
+        ?? String(clone.data.title ?? 'untitled').replace(/\s*·\s*尾部会话$/, '') + ' · 尾部会话'
     }
     return clone
   })
@@ -300,6 +317,7 @@ export function buildTailSeed(events, options = {}) {
       keptTurns,
       summaryKept: includeSummary,
       droppedBookkeeping,
+      ...(customTitle === undefined ? {} : { title: customTitle }),
       checkpointSeq: checkpoint.seq,
     },
   }

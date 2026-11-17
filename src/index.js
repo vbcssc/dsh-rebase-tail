@@ -26,13 +26,16 @@ export const RUN_ROUTE = '/plugins/dsh-rebase-tail/run'
 /** 一次执行请求的请求体上限：只有几个标量字段。 */
 const MAX_BODY_BYTES = 8192
 
-const USAGE = '用法：/rebase-tail [--turns N] [--drop-summary] [--drop-open-turn]'
+const USAGE = '用法：/rebase-tail [--turns N] [--drop-summary] [--drop-open-turn] [--title "新名字"]'
+/** 标题长度上限：会话列表一行放得下，也拦住误粘一整段话。 */
+const MAX_TITLE_LENGTH = 80
 const ERROR_TEXT = {
   'no-compaction': '这个会话还没有压缩点（没有 compaction/summary），没有包袱可甩。',
   'no-checkpoint': '最后一次压缩没有留下检查点消息，无法定位尾部起点。',
   'no-closed-turn': '压缩点之后没有任何完整结束的轮次，无法重建会话。',
   'turn-open': '当前这一轮还没结束。等它跑完再分切。',
   'bad-turns': '保留轮次需要一个大于 0 的整数。',
+  'bad-title': '新会话名称最长 ' + String(MAX_TITLE_LENGTH) + ' 个字符。',
 }
 
 /**
@@ -56,9 +59,33 @@ export function parseArguments(raw) {
       if (inline === undefined) index += 1
       continue
     }
+    const titleInline = token.startsWith('--title=') ? token.slice('--title='.length) : undefined
+    if (token === '--title' || titleInline !== undefined) {
+      // 竖线形式只能给一个词；空格分开的写法把**后面整行**都当名字，所以它必须放在最后。
+      const value = titleInline ?? tokens.slice(index + 1).join(' ')
+      if (titleInline === undefined && value.length === 0) return { error: USAGE }
+      const normalized = normalizeTitle(value)
+      if (normalized.error !== undefined) return { error: ERROR_TEXT['bad-title'] }
+      if (normalized.title !== undefined) options.title = normalized.title
+      if (titleInline === undefined) break
+      continue
+    }
     return { error: USAGE }
   }
   return { options }
+}
+
+/**
+ * 收敛一个用户给出的会话名。
+ * @param value - 原始输入。
+ * @returns { title } 或 { error: 'bad-title' }（超过长度上限）。
+ */
+export function normalizeTitle(value) {
+  if (typeof value !== 'string') return { title: undefined }
+  const title = value.replace(/\s+/g, ' ').trim()
+  if (title.length === 0) return { title: undefined }
+  if (title.length > MAX_TITLE_LENGTH) return { error: 'bad-title' }
+  return { title }
 }
 
 /**
@@ -71,6 +98,9 @@ export function parseRunBody(body) {
   const sessionId = body.sessionId
   if (typeof sessionId !== 'string' || sessionId.length === 0) return { error: '缺少 sessionId。' }
   const options = { includeInterruptedTurn: body.includeInterruptedTurn !== false, includeSummary: body.includeSummary !== false, turns: undefined }
+  const normalizedTitle = normalizeTitle(body.title)
+  if (normalizedTitle.error !== undefined) return { error: ERROR_TEXT['bad-title'] }
+  if (normalizedTitle.title !== undefined) options.title = normalizedTitle.title
   if (body.turns !== undefined && body.turns !== null) {
     const turns = body.turns
     if (!Number.isSafeInteger(turns) || turns < 1) return { error: ERROR_TEXT['bad-turns'] }
@@ -180,6 +210,7 @@ export async function runRebase(ctx, parent, options, signal) {
         + (stats.summaryKept ? '，含压缩摘要' : '，不含压缩摘要')
         + '）'
         + (stats.droppedOrphans > 0 ? '，剔除孤儿工具结果 ' + String(stats.droppedOrphans) + ' 条' : '')
+        + (stats.title === undefined ? '' : '，名称「' + stats.title + '」')
         + (attached ? '，已挂到当前工作区' : '')
         + '。在会话列表里打开它继续。',
     }
@@ -257,7 +288,7 @@ export function apply(ctx) {
         description: '把最近一次压缩之后的对话作为新会话（甩掉已压缩的历史包袱）',
         // 声明 input 才能让客户端把 /rebase-tail 后面的文字当成参数（leadingInput claim）；
         // 不声明时，带参数的一行会被当成普通提问发给模型。
-        input: { hint: '--turns N ｜ --drop-summary ｜ --drop-open-turn' },
+        input: { hint: '--turns N ｜ --drop-summary ｜ --drop-open-turn ｜ --title "新名字"' },
         handler: async (invocation) => {
           const parsed = parseArguments(invocation.rawInput.trim())
           if (parsed.error !== undefined) return { kind: 'error', text: parsed.error }

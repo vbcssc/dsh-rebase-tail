@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildTailSeed } from '../src/tail-seed.js'
-import { parseArguments, parseRunBody } from '../src/index.js'
+import { parseArguments, parseRunBody, normalizeTitle } from '../src/index.js'
 
 const turnStart = (seq, turn) => ({ type: 'turn/start', seq, time: seq, data: { turn } })
 const stepStart = (seq, turn, step) => ({ type: 'step/start', seq, time: seq, data: { turn, step } })
@@ -361,4 +361,51 @@ test('压缩摘要在新会话最前面作为普通用户消息出现', () => {
     ['permission/preset', 'session/title', 'model/selection'])
   // 摘要本身不能被改写
   assert.equal(built.seed.filter(event => event.type === 'user/message').length, 2)
+})
+
+
+test('新会话名称：给了就整条照用，没给才拼后缀', () => {
+  const withName = buildTailSeed(fixture(), { title: '我的尾部会话' })
+  assert.equal(withName.error, undefined)
+  assertSelfConsistent(withName.seed)
+  const titleEvent = withName.seed.find(event => event.type === 'session/title')
+  assert.equal(titleEvent.data.title, '我的尾部会话')
+  assert.equal(withName.stats.title, '我的尾部会话')
+  // 名字要排在对话之前
+  assert.ok(titleEvent.seq < withName.seed.findIndex(event => event.type === 'user/message'))
+
+  const defaulted = buildTailSeed(fixture())
+  assert.equal(defaulted.seed.find(event => event.type === 'session/title').data.title, '压缩点之后的尾巴 · 尾部会话')
+  assert.equal(defaulted.stats.title, undefined)
+})
+
+test('旧日志没有标题时，用户给的名字会合成一条 session/title', () => {
+  const events = fixture().filter(event => event.type !== 'session/title')
+  events.forEach((event, index) => { event.seq = index })
+  const built = buildTailSeed(events, { title: '无题也能起名' })
+  assert.equal(built.error, undefined)
+  assertSelfConsistent(built.seed)
+  const titleEvent = built.seed.find(event => event.type === 'session/title')
+  assert.equal(titleEvent?.data.title, '无题也能起名')
+  // 合成的标题不进 seqMap：压缩点仍然是普通用户消息，没被换成别的
+  assert.equal(built.seed.filter(event => event.type === 'user/message').length, 2)
+})
+
+test('名称的收敛规则：空白折叠、去首尾空白、超长拒绝、非文本忽略', () => {
+  assert.deepEqual(normalizeTitle('  我的   尾部  '), { title: '我的 尾部' })
+  assert.deepEqual(normalizeTitle('   '), { title: undefined })
+  assert.deepEqual(normalizeTitle(undefined), { title: undefined })
+  assert.deepEqual(normalizeTitle(42), { title: undefined })
+  assert.equal(normalizeTitle('长'.repeat(81)).error, 'bad-title')
+  assert.deepEqual(parseRunBody({ sessionId: 'session-x', title: ' 新名字 ' }).options, {
+    includeInterruptedTurn: true, includeSummary: true, turns: undefined, title: '新名字',
+  })
+  assert.match(parseRunBody({ sessionId: 'session-x', title: '长'.repeat(81) }).error, /最长 80/)
+  assert.deepEqual(parseArguments('--title=命令行起名').options.title, '命令行起名')
+  assert.deepEqual(parseArguments('--title 空格 前 的名字').options.title, '空格 前 的名字')
+  assert.match(parseArguments('--title').error, /用法/)
+  // 名字吃掉后面整行，前面的开关照旧生效
+  assert.deepEqual(parseArguments('--turns 3 --title 我的 尾部').options, {
+    includeInterruptedTurn: true, includeSummary: true, turns: 3, title: '我的 尾部',
+  })
 })

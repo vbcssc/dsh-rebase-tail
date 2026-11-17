@@ -33,6 +33,9 @@ window.__ModuleLoader__.load({
 
     const NS = 'rebase-tail'
 
+    /** 与 src/index.js 的 MAX_TITLE_LENGTH 同一数值：两边都拦一次，宿主才是权威。 */
+    const MAX_TITLE_LENGTH = 80
+
     /** 与 src/index.js 的 RUN_ROUTE 同一字面量。 */
     const RUN_ROUTE = '/plugins/dsh-rebase-tail/run'
 
@@ -87,6 +90,15 @@ window.__ModuleLoader__.load({
 .rt-lede { opacity: 0.72; font-size: 12px; }
 .rt-row { display: flex; align-items: center; gap: 8px; }
 .rt-label { font-size: 12px; opacity: 0.85; min-width: 62px; }
+.rt-text {
+  flex: 1 1 auto; min-width: 0; height: 26px; box-sizing: border-box; padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.32));
+  border-radius: var(--dsw-radius-sm, 6px);
+  background: var(--dsw-alias-bg-sunken, rgba(0, 0, 0, 0.2));
+  color: inherit; font: inherit; font-size: 12px;
+}
+.rt-placeholder { opacity: 0.55; font-size: 12px; }
+.rt-warn { color: var(--dsw-alias-danger-fg, #e06a6a); font-size: 12px; }
 .rt-num {
   width: 84px; height: 26px; box-sizing: border-box; padding: 0 8px;
   border: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.32));
@@ -144,6 +156,8 @@ window.__ModuleLoader__.load({
           open: false,
           /** 保留轮次。空串表示压缩点之后的全部完整轮次。 */
           turns: '',
+          /** 新会话的名称。空串表示沿用旧标题加" · 尾部会话"后缀。 */
+          title: '',
           /** 是否带上压缩摘要（不勾就看不清压缩点之前的结论）。 */
           includeSummary: true,
           /** 是否把没跑完那一轮的前半截也接上。 */
@@ -156,6 +170,7 @@ window.__ModuleLoader__.load({
           openDialog: (draft) => { draft.open = true; draft.phase = 'idle'; draft.text = '' },
           closeDialog: (draft) => { draft.open = false; draft.phase = 'idle'; draft.text = '' },
           setTurns: (draft, value) => { draft.turns = value },
+          setTitle: (draft, value) => { draft.title = value },
           toggleSummary: (draft) => { draft.includeSummary = !draft.includeSummary },
           toggleInterrupted: (draft) => { draft.includeInterruptedTurn = !draft.includeInterruptedTurn },
           start: (draft) => { draft.phase = 'working'; draft.text = '' },
@@ -211,15 +226,17 @@ window.__ModuleLoader__.load({
         // hook 全部在提前返回之前调用，数量不随状态变化。
         const open = read((state) => state.open) === true
         const turns = read((state) => state.turns) ?? ''
+        const title = read((state) => state.title) ?? ''
         const includeSummary = read((state) => state.includeSummary) !== false
         const includeInterruptedTurn = read((state) => state.includeInterruptedTurn) !== false
         const phase = read((state) => state.phase) ?? 'idle'
         const text = read((state) => state.text) ?? ''
         const numberRef = React.useRef(null)
+        const titleRef = React.useRef(null)
 
         React.useEffect(() => {
           if (!open) return undefined
-          const timer = setTimeout(() => { numberRef.current?.focus() }, 0)
+          const timer = setTimeout(() => { titleRef.current?.focus() }, 0)
           return () => { clearTimeout(timer) }
         }, [open])
 
@@ -237,6 +254,11 @@ window.__ModuleLoader__.load({
               return
             }
           }
+          const trimmedTitle = String(title).trim()
+          if (trimmedTitle.length > MAX_TITLE_LENGTH) {
+            actions.fail('新会话名称最长 ' + String(MAX_TITLE_LENGTH) + ' 个字符。')
+            return
+          }
           actions.start()
           try {
             const response = await fetch(RUN_ROUTE, {
@@ -245,6 +267,7 @@ window.__ModuleLoader__.load({
               body: JSON.stringify({
                 sessionId,
                 ...(parsedTurns === undefined ? {} : { turns: parsedTurns }),
+                ...(trimmedTitle.length === 0 ? {} : { title: trimmedTitle }),
                 includeSummary,
                 includeInterruptedTurn,
               }),
@@ -282,6 +305,19 @@ window.__ModuleLoader__.load({
               h('div', { className: 'rt-lede' },
                 '把最近一次压缩点之后的对话搬进一个新会话。压缩之前的事件不再出现在新会话里，'
                 + '所以它不会背着旧日志继续跑。原会话不受影响。'),
+              h('div', { className: 'rt-row' },
+                h('span', { className: 'rt-label' }, '名称'),
+                h('input', {
+                  ref: titleRef,
+                  className: 'rt-text',
+                  type: 'text',
+                  value: title,
+                  maxLength: MAX_TITLE_LENGTH,
+                  disabled: working,
+                  placeholder: '留空＝旧标题 +「 · 尾部会话」',
+                  onChange: (event) => { actions.setTitle(event.target.value) },
+                  onKeyDown: (event) => { if (event.key === 'Enter') void run() },
+                })),
               h('div', { className: 'rt-row' },
                 h('span', { className: 'rt-label' }, '保留轮次'),
                 h('input', {
