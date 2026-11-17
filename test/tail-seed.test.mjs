@@ -29,6 +29,16 @@ const toolResult = (seq, turn, step, callId) => ({
   surfaceOp: 'append',
 })
 const compaction = (seq, type) => ({ type, seq, time: seq, data: {} })
+/** 压缩检查点用真实日志的形状：content / source / id 都在 data 上，surfaceOp 是替换。 */
+const checkpointMessage = (seq, turn, step, text, startSeq, endSeq) => ({
+  type: 'user/message', seq, time: seq,
+  data: {
+    turn, step, id: 'checkpoint-1', role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'compact-checkpoint', compactionId: 'compaction-1' },
+  },
+  surfaceOp: { op: 'replace', startSeq, endSeq },
+})
 
 /**
  * 一轮完整对话 → 第二次压缩发生在 turn 2 中间（step 1 被压缩，step 2 留在尾部，
@@ -52,7 +62,7 @@ function fixture() {
     stepEnd(13, 2, 1),
     compaction(14, 'compaction/start'),
     compaction(15, 'compaction/summary'),
-    userMessage(16, 2, 1, '模型写的摘要', { op: 'replace', startSeq: 10, endSeq: 13 }),
+    checkpointMessage(16, 2, 1, '模型写的摘要', 10, 13),
     compaction(17, 'compaction/end'),
     stepStart(18, 2, 2),
     toolResult(19, 2, 2, 'Z'),
@@ -127,7 +137,8 @@ test('压缩点之后重建尾部：起点是摘要、继承运行态、丢掉�
     ['permission/preset', 'session/title', 'model/selection'], '运行态取旧日志里的最后一次，放在头部')
   assert.equal(seed[3].type, 'user/message')
   assert.equal(seed[3].surfaceOp, 'append', '被遮住的历史正好是要丢的部分，替换降级为追加')
-  assert.equal(seed[3].data.message.content, '模型写的摘要')
+  assert.equal(seed[3].data.content[1].text, '模型写的摘要')
+  assert.match(seed[3].data.content[0].text, /【压缩摘要】/, '摘要前置一段说明，前台才看得见它是什么')
 
   assert.equal(seed.some(event => event.type.startsWith('compaction/')), false, '不保留 compression 事务事件')
   assert.equal(seed.some(event => event.type === 'workspace/changes'), false, 'turn/end 之后的簿记事件丢弃')
@@ -250,7 +261,7 @@ test('--drop-summary：不带压缩摘要，从第一个完整轮次开始', () 
   assertSelfConsistent(built.seed)
   assert.equal(built.stats.summaryKept, false)
   assert.equal(built.stats.interruptedTurnEvents, 0)
-  assert.equal(built.seed.some(event => event.data?.source?.kind === 'compact-checkpoint'), false, '摘要消息整条不带')
+  assert.equal(JSON.stringify(built.seed).includes('模型写的摘要'), false, '摘要消息整条不带')
   assert.deepEqual(built.seed.slice(0, 3).map(event => event.type),
     ['permission/preset', 'session/title', 'model/selection'], '运行态仍从旧日志继承')
   assert.equal(built.seed[3].type, 'turn/start')
@@ -331,4 +342,23 @@ test('浏览器半边的请求体：缺 sessionId、轮次不合法都要拒绝'
   assert.match(parseRunBody({ sessionId: 'session-x', turns: 0 }).error, /整数/)
   assert.match(parseRunBody({ sessionId: 'session-x', turns: 2.5 }).error, /整数/)
   assert.match(parseRunBody({ sessionId: 'session-x', turns: '3' }).error, /整数/)
+})
+
+
+test('压缩摘要在新会话最前面作为普通用户消息出现', () => {
+  const built = buildTailSeed(fixture())
+  assert.equal(built.error, undefined)
+  assertSelfConsistent(built.seed)
+  const first = built.seed.find(event => event.type === 'user/message')
+  assert.ok(first, '种子里必须有那条摘要消息')
+  // 客户端把 compact-checkpoint 源的 user/message 当上下文注入渲染，前台看不到正文；
+  // 搬过来必须换成普通用户消息，摘要才会出现在对话最前面。
+  assert.equal(first.data.source.kind, 'user')
+  assert.match(first.data.content[0].text, /【压缩摘要】/)
+  assert.equal(first.data.content[1].text, '模型写的摘要')
+  // 它前面只有搬过来的运行态记录，没有任何对话：摘要就是新会话的第一条内容。
+  assert.deepEqual(built.seed.slice(0, first.seq).map(event => event.type),
+    ['permission/preset', 'session/title', 'model/selection'])
+  // 摘要本身不能被改写
+  assert.equal(built.seed.filter(event => event.type === 'user/message').length, 2)
 })

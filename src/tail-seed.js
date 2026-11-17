@@ -16,6 +16,16 @@
 /** 能进入模型可见面的事件类型。 */
 const SURFACE_TYPES = new Set(['system/message', 'developer/message', 'user/message', 'assistant/message', 'tool/result'])
 /** 压缩事务自身的日志事件：新会话不保留（摘要已经作为检查点消息存在）。 */
+/**
+ * 压缩摘要搬到新会话时前置的一块说明。
+ *
+ * 客户端把 `source.kind === 'compact-checkpoint'` 的 user/message 当上下文注入渲染
+ * （前台只留一个不起眼的上下文条目，看不到摘要正文），而且它的替换语义在子会话里没有
+ * 可遮的范围。所以检查点落进种子时改成一条普通用户消息：摘要就成了新会话最前面
+ * 那条看得见的对话。
+ */
+const SUMMARY_HEADER = '【压缩摘要】以下是旧会话压缩点之前那段对话的自动回顾。'
+
 const COMPACTION_TYPES = new Set(['compaction/start', 'compaction/summary', 'compaction/end'])
 /** 从旧日志头部继承的运行态设置（各自取最后一次）。 */
 const STATE_TYPES = ['permission/preset', 'sandbox/mode', 'approval/policy', 'model/selection', 'session/title']
@@ -260,6 +270,11 @@ export function buildTailSeed(events, options = {}) {
     } else {
       delete clone.surfaceOp
       delete clone.sourceEventSeqs
+    }
+    if (record.isCheckpoint === true) {
+      clone.data.source = { kind: 'user' }
+      const blocks = Array.isArray(clone.data.content) ? clone.data.content : []
+      clone.data.content = [{ type: 'text', text: SUMMARY_HEADER }, ...blocks]
     }
     if (clone.type === 'developer/message' && typeof clone.data?.headerSeq === 'number') {
       const mapped = seqMap.get(clone.data.headerSeq)

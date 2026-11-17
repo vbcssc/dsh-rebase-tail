@@ -76,7 +76,7 @@ pnpm add link:D:/docker_and_big_models/开源仓库-分析区/dsh-rebase-tail
   turn N+1 …                                     ← 完整轮次
 ```
 
-- **起点**：最后一次 `compaction/summary` 的替换消息（紧凑检查点 `user/message`）。它的 `surfaceOp: replace` 降级为 `append`——被它遮住的历史正好是要丢掉的部分，降级后它自然变成「带摘要的普通 user 消息」。`source: compact-checkpoint` 保留，界面上仍是压缩卡片。
+- **起点**：最后一次 `compaction/summary` 的替换消息（紧凑检查点 `user/message`）。`surfaceOp: replace` 降级为 `append`（被它遮住的历史正好是要丢掉的部分），`source.kind` 由 `compact-checkpoint` 改成 `user`，并在正文前加一块 `【压缩摘要】…`。后两件事是为了让它看得见：客户端对 `compact-checkpoint` 源的 user/message 走「上下文注入」渲染（`packages/client/ui-chat/src/client/conversation-nodes/message.ts` 的 `isCompactionCheckpoint` 只认替换事件，`start()` 里 `source.kind !== 'user'` 的分支把消息归成 context），前台就没有正文；而它的替换语义在子会话里本来也没有可遮的范围。改完它就是新会话最前面那条普通用户消息。
 - **终点**：最后一个 `turn/end`。之后的重排、队列快照等簿记事件丢弃。
 - **压缩点所在 turn 的后半截**：它没有 `turn/start`（前半截被压缩了），插件补一条合成的 `turn/start`，只从第一个完整的 `step/start` 开始接续；**孤儿 `tool/result`**（其 `tool/call` 落在压缩区）被剔除，否则会拼出「只有结果没有调用」的请求。`--drop-open-turn` 时这半截整体丢弃，检查点也不再带 `turn`/`step`（那一轮既没有开头也没有结尾）。
 - **重排**：`seq` 从 0 连续；`turn` 从 1、每轮 `step` 从 1 重排；`surfaceOp` / `sourceEventSeqs` 按新编号重写，指向已丢弃事件的替换降级为 `append`、悬空引用删除。
@@ -101,7 +101,7 @@ pnpm add link:D:/docker_and_big_models/开源仓库-分析区/dsh-rebase-tail
 
 ## 已知边界
 
-- **压缩摘要会作为第一条 user 消息出现**（`This is an automatically generated checkpoint …` 那种 9KB 级回顾）。它是模型可见上下文的一部分，默认原样带过来；取消勾选「带上压缩摘要」可以不带。
+- **压缩摘要就是新会话最前面那条 user 消息**：正文前多一行 `【压缩摘要】以下是旧会话压缩点之前那段对话的自动回顾。`，其余原样（`This is an automatically generated checkpoint …` 那段开场、9KB 级正文、`</compacted-summary>` 收尾）。它同时是模型可见上下文的一部分；取消勾选「带上压缩摘要」则整条不带。
 - **新会话里的下一轮对话没有测过**：验证只到「模型可见请求构造正确 + 会话能渲染/恢复」。
 - 压缩点所在 turn 的后半截里若出现 `/compact`、图片 offload、tool-result 裁剪等**跨切点替换**事件，当前策略一律降级为 `append`。
 - preset 必须在该宿主里存在，否则会话本身就无法恢复（`Unknown agent preset`）——与插件无关，但会让按钮无处可点。
