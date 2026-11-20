@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { buildTailSeed } from '../src/tail-seed.js'
-import { parseArguments, parseRunBody, normalizeTitle } from '../src/index.js'
+import { parseArguments, parseRunBody, normalizeTitle, normalizePreset } from '../src/index.js'
 
 const turnStart = (seq, turn) => ({ type: 'turn/start', seq, time: seq, data: { turn } })
 const stepStart = (seq, turn, step) => ({ type: 'step/start', seq, time: seq, data: { turn, step } })
@@ -428,4 +428,28 @@ test('头部的 system/message 必须占住 surface 的 0 号节点（否则冷�
   assert.deepEqual(noSummary.seed.slice(3, 8).map(event => event.type),
     ['turn/start', 'step/start', 'system/message', 'step/end', 'turn/end'])
   assertSelfConsistent(noSummary.seed)
+})
+
+
+test('预设：默认跟随原会话，也能指定 id', () => {
+  assert.deepEqual(normalizePreset(undefined), { preset: undefined })
+  assert.deepEqual(normalizePreset(''), { preset: undefined })
+  assert.deepEqual(normalizePreset('   '), { preset: undefined })
+  assert.deepEqual(normalizePreset('  standard '), { preset: 'standard' })
+  assert.equal(normalizePreset('x'.repeat(65)).error, 'bad-preset')
+
+  // 不写 --preset 时没有该字段：宿主回落到"跟随原会话"
+  assert.equal(parseArguments('').options.preset, undefined)
+  assert.deepEqual(parseArguments('--preset standard').options.preset, 'standard')
+  assert.deepEqual(parseArguments('--preset=minimal').options.preset, 'minimal')
+  assert.deepEqual(parseArguments('--turns 2 --preset plan').options.preset, 'plan')
+  assert.match(parseArguments('--preset').error, /用法/)
+  assert.match(parseArguments('--preset=' + 'x'.repeat(65)).error, /预设/)
+
+  // 请求体同样：缺省 = 跟随原会话
+  assert.equal(parseRunBody({ sessionId: 'session-x' }).options.preset, undefined)
+  assert.equal(parseRunBody({ sessionId: 'session-x', preset: '' }).options.preset, undefined)
+  assert.deepEqual(parseRunBody({ sessionId: 'session-x', preset: 'minimal' }).options, {
+    includeInterruptedTurn: true, includeSummary: true, turns: undefined, preset: 'minimal',
+  })
 })

@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## 0.4.1
+
+- 修：弹窗里的预设列表配色不对。两处原因：一是原生 `<select>` 的展开弹层由浏览器自绘，配色只跟 `color-scheme` 走（选中行还会盖一层系统高亮，`accent-color` 改不动），深色主题下图里就是白底蓝条；二是本插件样式表里的颜色变量全是臆造的——`--dsw-alias-bg-elevated`、`--dsw-alias-text-primary`、`--dsw-alias-border-subtle` 等 14 个在宿主里根本不存在，写错名字不报错，只会静默落进 fallback。现在改用宿主真实的语义 token（`--dsw-alias-bg-layer-2`／`--dsw-alias-label-primary`／`--dsw-alias-border-l4`／`--dsw-elevation-prominent` 等，22 个全部核对存在），并把原生下拉换成自绘列表（内联展开，避免被正文 `overflow` 裁掉，带 `role="listbox"`、Esc 与点外部收起）。
+
+## 0.4.0
+
+- 新增：分切时可以给新会话**换一个 agent preset**（弹窗里的「预设」下拉，默认「跟随原会话」；命令行 `--preset <id>`）。清单从宿主现读（新增 `GET /plugins/dsh-rebase-tail/presets`），宿主增删预设立刻反映；不可用的预设在下拉里标注并禁用。
+- 换预设就等于换掉新会话的系统提示词，不需要额外搬运：Agent 每次请求都用当前挂载装配重新渲染提示词，写入日志的 system/message 是「替换 surface 0 号节点」，种子里的过渡性头部当场被盖掉。已用 SystemPromptProjection 实测：`{op:'replace',startSeq:7,endSeq:7}`，替换后 surface 上只剩新提示词那一节点。
+- 指定的预设不存在时退回默认预设，并在回执里说明（`预设「x」不存在，改用「y」`），不静默降级。
+
+## 0.3.2
+
+- 改：分切成功后**自动关闭弹窗**。回执改成底部 toast（`createPortal` 挂到 body，12 秒后自动消失，再次点开弹窗时清除），不再需要手动点「完成」。
+- 失败仍然留在弹窗里就地显示原因，方便改参数重试；「取消」按钮不再随成功状态变字。
+- 真机验证：点「开始分切」后弹窗计数 1→0、toast 出现并带「已建好尾部会话 session-… 」；参数非法（保留轮次 99）时弹窗仍为 1 且显示原因。
+
 ## 0.3.1
 
 - 修：分切出来的会话**用一次之后就打不开**（冷启动报 `stored log is corrupt: SessionFormatError: system/message requires a protected first surface head`）。根因是种子的 surface 从摘要那条 user/message 开始：agent-loop 在第一轮会往 surface 追加一条 system/message（`SystemPromptProjection.project` 找不到任何 system 节点时就是追加），而服务端校验要求"日志里一旦有 system/message，surface 的 0 号节点必须是它"。创建和继续用都不校验这条，只有重新打开日志时才校验，所以症状是"重启后历史加载失败"。

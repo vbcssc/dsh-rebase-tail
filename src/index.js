@@ -23,10 +23,15 @@ export const name = 'dsh-rebase-tail'
 /** 浏览器半边提交执行请求的路径。两条半边靠这个字面量对齐。 */
 export const RUN_ROUTE = '/plugins/dsh-rebase-tail/run'
 
+/** 浏览器半边读取可选预设清单的路径。 */
+export const PRESETS_ROUTE = '/plugins/dsh-rebase-tail/presets'
+
 /** 一次执行请求的请求体上限：只有几个标量字段。 */
 const MAX_BODY_BYTES = 8192
 
-const USAGE = '用法：/rebase-tail [--turns N] [--drop-summary] [--drop-open-turn] [--title "新名字"]'
+const USAGE = '用法：/rebase-tail [--turns N] [--drop-summary] [--drop-open-turn] [--preset <预设 id>] [--title "新名字"]'
+/** 预设 id 的长度上限：只是拦住误粘的整段文本。 */
+const MAX_PRESET_LENGTH = 64
 /** 标题长度上限：会话列表一行放得下，也拦住误粘一整段话。 */
 const MAX_TITLE_LENGTH = 80
 const ERROR_TEXT = {
@@ -36,6 +41,7 @@ const ERROR_TEXT = {
   'turn-open': '当前这一轮还没结束。等它跑完再分切。',
   'bad-turns': '保留轮次需要一个大于 0 的整数。',
   'bad-title': '新会话名称最长 ' + String(MAX_TITLE_LENGTH) + ' 个字符。',
+  'bad-preset': '预设 id 不合法（最长 ' + String(MAX_PRESET_LENGTH) + ' 个字符）。',
 }
 
 /**
@@ -57,6 +63,18 @@ export function parseArguments(raw) {
       if (!Number.isFinite(parsed) || parsed < 1) return { error: USAGE }
       options.turns = parsed
       if (inline === undefined) index += 1
+      continue
+    }
+    const presetInline = token.startsWith('--preset=') ? token.slice('--preset='.length) : undefined
+    if (token === '--preset' || presetInline !== undefined) {
+      const value = presetInline ?? tokens[index + 1]
+      // 光写 --preset 不给值：按用法错误处理，而不是悄悄当成"跟随原会话"。
+      if (presetInline === undefined && value === undefined) return { error: USAGE }
+      const normalized = normalizePreset(value)
+      if (normalized.error !== undefined) return { error: ERROR_TEXT[normalized.error] }
+      // 空串等于"跟随原会话"：显式写成默认值也不报错。
+      if (normalized.preset !== undefined) options.preset = normalized.preset
+      if (presetInline === undefined) index += 1
       continue
     }
     const titleInline = token.startsWith('--title=') ? token.slice('--title='.length) : undefined
@@ -89,6 +107,20 @@ export function normalizeTitle(value) {
 }
 
 /**
+ * 收敛一个预设 id。空串/空白表示"跟随原会话"。
+ * @param value - 原始输入。
+ * @returns { preset }（可能是 undefined）或 { error: 'bad-preset' }。
+ */
+export function normalizePreset(value) {
+  if (value === undefined || value === null) return { preset: undefined }
+  if (typeof value !== 'string') return { error: 'bad-preset' }
+  const preset = value.trim()
+  if (preset.length === 0) return { preset: undefined }
+  if (preset.length > MAX_PRESET_LENGTH) return { error: 'bad-preset' }
+  return { preset }
+}
+
+/**
  * 校验浏览器半边提交的请求体，并换成内部的选项字面量。
  * @param body - 已解析的 JSON 请求体。
  * @returns 会话 id 与选项，或 { error } 表示请求不合法。
@@ -101,6 +133,9 @@ export function parseRunBody(body) {
   const normalizedTitle = normalizeTitle(body.title)
   if (normalizedTitle.error !== undefined) return { error: ERROR_TEXT['bad-title'] }
   if (normalizedTitle.title !== undefined) options.title = normalizedTitle.title
+  const normalizedPreset = normalizePreset(body.preset)
+  if (normalizedPreset.error !== undefined) return { error: ERROR_TEXT[normalizedPreset.error] }
+  if (normalizedPreset.preset !== undefined) options.preset = normalizedPreset.preset
   if (body.turns !== undefined && body.turns !== null) {
     const turns = body.turns
     if (!Number.isSafeInteger(turns) || turns < 1) return { error: ERROR_TEXT['bad-turns'] }
@@ -125,15 +160,30 @@ function lastSelection(events) {
   return undefined
 }
 
-/** 组装新 Agent 的预先发布 setup：绑定父会话当前的 agent preset。 */
-function compositionFor(ctx, session) {
+/**
+ * 组装新 Agent 的预先发布 setup：绑定要跟随的 agent preset。
+ *
+ * 预设决定新会话第一轮挂载哪些插件——工具清单、提示词分节都在里面。所以换预设
+ * 就是换掉首轮的系统提示词：Agent 每次请求都用当前装配重新 assemble 系统提示词，
+ * 写入日志的 system/message 是替换语义（replace 0 号节点），旧提示词当场被盖掉，
+ * 模型从第一条请求起看到的就是新预设的提示词。
+ * @param ctx - 插件上下文。
+ * @param session - 源会话（preset 未指定时从它继承）。
+ * @param preset - 用户选定的预设 id；undefined 表示"跟随原会话"。
+ * @returns presetId 与 setup。
+ */
+function compositionFor(ctx, session, preset) {
   const presets = ctx.get('agentPresets')
   if (presets === undefined) return { presetId: undefined, setup: () => {} }
-  const current = presets.presetForSession?.(session)
+  const inherited = presets.presetForSession?.(session) ?? undefined
+  const current = preset ?? inherited
+  /** 实际挂载成功的预设；setup 跑完之后才确定（指定的预设可能并不存在）。 */
+  const effective = { id: undefined }
   return {
     presetId: current,
+    effective,
     setup: async (agentCtx) => {
-      // 会话记录的 preset 可能已经被删除或改名：退回默认 preset，而不是让整次分切失败。
+      // 指定的预设可能被删除/改名：退回默认 preset，而不是让整次分切失败。
       let resolved
       try {
         resolved = await presets.resolve(current)
@@ -141,8 +191,62 @@ function compositionFor(ctx, session) {
         ctx.logger?.warn?.('rebase-tail: preset ' + String(current) + ' 不可用，改用默认 preset：' + String(error))
         resolved = await presets.resolve(undefined)
       }
+      if (preset !== undefined && resolved.id !== preset) {
+        // 静默退回默认预设会让用户以为选中的预设生效了：把真实结果带回去。
+        ctx.logger?.warn?.('rebase-tail: 选定的预设 ' + String(preset) + ' 不存在，实际使用 ' + String(resolved.id))
+      }
+      effective.id = resolved.id
       await presets.mount(agentCtx, resolved.id)
     },
+  }
+}
+
+/**
+ * 回执里那句"预设"说明。只有真的换了预设才提，跟随原会话时保持静默。
+ * @param composition - compositionFor 的返回值。
+ * @param requested - 用户指定的预设，undefined 表示跟随原会话。
+ * @returns 回执片段（可能为空串）。
+ */
+function presetNote(composition, requested) {
+  const effective = composition.effective?.id
+  if (effective === undefined) return ''
+  if (requested === undefined) {
+    // 跟随原会话：只有旧日志记录的预设已不存在、退回默认时才需要说一句。
+    const inherited = composition.presetId
+    return inherited !== undefined && inherited !== effective
+      ? '，预设「' + String(inherited) + '」已不存在，改用「' + effective + '」'
+      : ''
+  }
+  return effective === requested
+    ? '，预设「' + effective + '」'
+    : '，预设「' + String(requested) + '」不存在，改用「' + effective + '」'
+}
+
+/**
+ * 读当前可选的预设清单。
+ * @param ctx - 插件上下文。
+ * @returns { presets, default } —— presets 里每项带 id/name/description/isDefault/broken。
+ */
+export async function listPresets(ctx) {
+  const presets = ctx.get('agentPresets')
+  if (presets === undefined) return { presets: [], default: null }
+  let roster = []
+  try {
+    roster = await (presets.list?.() ?? [])
+  } catch (error) {
+    ctx.logger?.warn?.('rebase-tail: 读取预设清单失败：' + String(error))
+    return { presets: [], default: null }
+  }
+  const fallback = presets.defaultId ?? null
+  return {
+    default: fallback,
+    presets: roster.map(row => ({
+      id: row.id,
+      ...(row.name === undefined ? {} : { name: row.name }),
+      ...(row.description === undefined ? {} : { description: row.description }),
+      ...(row.broken === undefined ? {} : { broken: row.broken }),
+      isDefault: row.id === fallback,
+    })),
   }
 }
 
@@ -184,7 +288,7 @@ export async function runRebase(ctx, parent, options, signal) {
 
     const header = observation.header
     const selection = lastSelection(observation.events) ?? ctx.get('agentDefaultModel')?.currentSelection()
-    const composition = compositionFor(ctx, parent)
+    const composition = compositionFor(ctx, parent, options.preset)
     const childSessionId = 'session-' + randomUUID()
     await ctx.agents.create({
       sessionId: childSessionId,
@@ -211,6 +315,7 @@ export async function runRebase(ctx, parent, options, signal) {
         + '）'
         + (stats.droppedOrphans > 0 ? '，剔除孤儿工具结果 ' + String(stats.droppedOrphans) + ' 条' : '')
         + (stats.title === undefined ? '' : '，名称「' + stats.title + '」')
+        + presetNote(composition, options.preset)
         + (attached ? '，已挂到当前工作区' : '')
         + '。在会话列表里打开它继续。',
     }
@@ -288,7 +393,7 @@ export function apply(ctx) {
         description: '把最近一次压缩之后的对话作为新会话（甩掉已压缩的历史包袱）',
         // 声明 input 才能让客户端把 /rebase-tail 后面的文字当成参数（leadingInput claim）；
         // 不声明时，带参数的一行会被当成普通提问发给模型。
-        input: { hint: '--turns N ｜ --drop-summary ｜ --drop-open-turn ｜ --title "新名字"' },
+        input: { hint: '--turns N ｜ --drop-summary ｜ --drop-open-turn ｜ --preset <预设 id> ｜ --title "新名字"' },
         handler: async (invocation) => {
           const parsed = parseArguments(invocation.rawInput.trim())
           if (parsed.error !== undefined) return { kind: 'error', text: parsed.error }
@@ -301,6 +406,21 @@ export function apply(ctx) {
 
     // 冷启动时 webServer 通常晚于本插件就绪，且 headless/TUI 装配里根本没有它：
     // 用 ctx.inject 等它就绪，拿不到就只是没有按钮那条路，命令照旧可用。
+    scoped.inject(['webServer'], (served) => served.effect(
+      () => served.webServer.register({
+        kind: 'exact',
+        path: PRESETS_ROUTE,
+        handler: async (_req, res) => {
+          try {
+            sendJson(res, 200, { ok: true, ...(await listPresets(served)) })
+          } catch (error) {
+            sendJson(res, 500, { ok: false, text: '读取预设清单失败：' + String(error?.message ?? error) })
+          }
+        },
+      }),
+      'rebase-tail presets route',
+    ))
+
     scoped.inject(['webServer'], (served) => served.effect(
       () => served.webServer.register({
         kind: 'exact',

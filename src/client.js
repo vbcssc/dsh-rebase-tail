@@ -36,6 +36,9 @@ window.__ModuleLoader__.load({
     /** 与 src/index.js 的 MAX_TITLE_LENGTH 同一数值：两边都拦一次，宿主才是权威。 */
     const MAX_TITLE_LENGTH = 80
 
+    /** 与 src/index.js 的 PRESETS_ROUTE 同一字面量。 */
+    const PRESETS_ROUTE = '/plugins/dsh-rebase-tail/presets'
+
     /** 与 src/index.js 的 RUN_ROUTE 同一字面量。 */
     const RUN_ROUTE = '/plugins/dsh-rebase-tail/run'
 
@@ -43,98 +46,148 @@ window.__ModuleLoader__.load({
     let internals = null
 
     const CSS = `
+/* 颜色一律取宿主的语义 token（packages/client/ui-theme/src/styles/design-platform.css）。
+   宿主没有的变量不要臆造：写错名字不会报错，只会静默落进 fallback，深色主题下看起来"还行"、
+   切到浅色或原生控件时就露馅。 */
 .rt-root { display: inline-flex; align-items: center; }
 .rt-pill {
   display: inline-flex; align-items: center; gap: 4px;
   height: 28px; box-sizing: border-box; padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.28));
-  border-radius: var(--dsw-radius-sm, 6px);
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-sm);
   background: transparent; color: inherit;
   font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
   white-space: nowrap;
 }
-.rt-pill:hover { background: var(--dsw-alias-fill-subtle, rgba(128, 128, 128, 0.12)); }
+.rt-pill:hover { background: var(--dsw-alias-interactive-bg-hover); }
 .rt-pill[data-open='true'] {
-  background: var(--dsw-alias-fill-subtle, rgba(128, 128, 128, 0.16));
-  border-color: var(--dsw-alias-border-strong, rgba(128, 128, 128, 0.45));
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-color: var(--dsw-alias-border-l4);
 }
 .rt-pill[disabled] { opacity: 0.5; cursor: not-allowed; }
 .rt-mask {
   position: fixed; inset: 0; z-index: 1000;
   display: flex; align-items: center; justify-content: center;
-  background: var(--dsw-alias-scrim, rgba(0, 0, 0, 0.42));
+  background: var(--dsw-alias-bg-mask-1);
 }
 .rt-modal {
   width: min(520px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
   display: flex; flex-direction: column;
-  border-radius: var(--dsw-radius-md, 10px);
-  border: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.28));
-  background: var(--dsw-alias-bg-elevated, #1f2023);
-  color: var(--dsw-alias-text-primary, inherit);
-  box-shadow: var(--dsw-alias-shadow-overlay, 0 12px 40px rgba(0, 0, 0, 0.4));
+  border-radius: var(--dsw-radius-lg);
+  /* 原生 <select> 的弹层不读 CSS 背景色，只跟 color-scheme 走；
+     显式钉住它，深色主题下才是深色列表而不是系统浅色。 */
+  color-scheme: light;
+  border: 0;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-elevation-prominent);
   font-size: 13px; line-height: 1.5;
 }
+body[data-ds-dark-theme] .rt-modal { color-scheme: dark; }
 .rt-head {
   display: flex; align-items: center; gap: 8px;
-  padding: 12px 14px; border-bottom: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.2));
+  padding: 12px 14px; border-bottom: 0.5px solid var(--dsw-alias-border-l2);
   font-size: 13px; font-weight: 600;
 }
 .rt-spacer { flex: 1 1 auto; }
 .rt-close {
-  border: 0; background: transparent; color: inherit; cursor: pointer;
-  font-size: 16px; line-height: 1; padding: 2px 4px; border-radius: var(--dsw-radius-sm, 6px); opacity: 0.7;
+  border: 0; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer;
+  font-size: 16px; line-height: 1; padding: 2px 4px; border-radius: var(--dsw-radius-sm);
 }
-.rt-close:hover { opacity: 1; background: var(--dsw-alias-fill-subtle, rgba(128, 128, 128, 0.16)); }
+.rt-close:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
 .rt-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
-.rt-lede { opacity: 0.72; font-size: 12px; }
+.rt-lede { color: var(--dsw-alias-label-secondary); font-size: 12px; }
 .rt-row { display: flex; align-items: center; gap: 8px; }
-.rt-label { font-size: 12px; opacity: 0.85; min-width: 62px; }
+/* 预设列表展开后这一行会变高：标签贴顶，才跟触发按钮对齐。 */
+.rt-row-top { align-items: flex-start; }
+.rt-row-top .rt-label { padding-top: 7px; }
+.rt-label { color: var(--dsw-alias-label-secondary); font-size: 12px; min-width: 62px; }
 .rt-text {
   flex: 1 1 auto; min-width: 0; height: 26px; box-sizing: border-box; padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.32));
-  border-radius: var(--dsw-radius-sm, 6px);
-  background: var(--dsw-alias-bg-sunken, rgba(0, 0, 0, 0.2));
-  color: inherit; font: inherit; font-size: 12px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px;
 }
-.rt-placeholder { opacity: 0.55; font-size: 12px; }
-.rt-warn { color: var(--dsw-alias-danger-fg, #e06a6a); font-size: 12px; }
+.rt-text:focus-visible, .rt-num:focus-visible, .rt-trigger:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+}
+/* 预设选择器：自绘列表。原生 <select> 的弹层由浏览器自绘，配色只跟 color-scheme 走，
+   选中行还会盖一层系统高亮，跟宿主菜单对不上。 */
+.rt-picker { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; min-width: 0; }
+.rt-trigger {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; cursor: pointer;
+}
+.rt-trigger:disabled { opacity: 0.55; cursor: default; }
+.rt-trigger-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 用 CSS 三角形而不是字符：字体缺 ▾ 字形时会缩成一个小点。 */
+.rt-caret {
+  flex: 0 0 auto; width: 0; height: 0;
+  border-left: 3.5px solid transparent; border-right: 3.5px solid transparent;
+  border-top: 4.5px solid var(--dsw-alias-label-tertiary);
+}
+/* 内联展开而不是浮层：正文是 overflow:auto，绝对定位的列表会被裁掉下半截。 */
+.rt-list {
+  max-height: 240px; overflow: auto; padding: 4px;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-prominent);
+}
+.rt-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 5px 8px; border: 0; border-radius: var(--dsw-radius-sm);
+  background: transparent; color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+}
+.rt-item:hover:not([disabled]) { background: var(--dsw-alias-interactive-bg-hover); }
+.rt-item[aria-selected='true'] { background: var(--dsw-alias-interactive-bg-hover); font-weight: 600; }
+.rt-item[disabled] { color: var(--dsw-alias-label-tertiary); cursor: default; }
+.rt-item-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-item-note { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary); font-size: 11px; }
+.rt-placeholder { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.rt-warn { color: var(--dsw-alias-state-error-primary); font-size: 12px; }
 .rt-num {
   width: 84px; height: 26px; box-sizing: border-box; padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.32));
-  border-radius: var(--dsw-radius-sm, 6px);
-  background: var(--dsw-alias-bg-sunken, rgba(0, 0, 0, 0.2));
-  color: inherit; font: inherit; font-size: 12px;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-3);
+  color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px;
 }
 .rt-check { display: flex; align-items: flex-start; gap: 6px; font-size: 12px; cursor: pointer; }
 .rt-check input { margin: 3px 0 0; }
-.rt-check small { opacity: 0.65; }
+.rt-check small { color: var(--dsw-alias-label-tertiary); }
 .rt-result {
-  border-radius: var(--dsw-radius-sm, 6px); padding: 8px 10px; font-size: 12px;
-  border: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.24));
-  background: var(--dsw-alias-fill-subtle, rgba(128, 128, 128, 0.1));
+  border-radius: var(--dsw-radius-md); padding: 8px 10px; font-size: 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-3);
   white-space: pre-wrap; word-break: break-word;
 }
-.rt-result[data-tone='error'] {
-  border-color: var(--dsw-alias-danger-border, rgba(220, 80, 80, 0.5));
-  background: var(--dsw-alias-danger-bg, rgba(220, 80, 80, 0.12));
+.rt-toast {
+  position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%);
+  max-width: min(640px, calc(100vw - 48px));
+  padding: 10px 16px; border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-toast-bg); color: var(--dsw-alias-toast-label);
+  box-shadow: var(--dsw-elevation-prominent);
+  font-size: 13px; line-height: 1.5; z-index: 10000; white-space: pre-wrap; word-break: break-word;
 }
 .rt-foot {
   display: flex; align-items: center; gap: 8px;
-  padding: 10px 14px; border-top: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.2));
+  padding: 10px 14px; border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
 .rt-btn {
   height: 28px; padding: 0 12px; box-sizing: border-box;
-  border: 1px solid var(--dsw-alias-border-subtle, rgba(128, 128, 128, 0.32));
-  border-radius: var(--dsw-radius-sm, 6px);
-  background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer;
+  border: 0.5px solid var(--dsw-alias-border-l4);
+  border-radius: var(--dsw-radius-sm);
+  background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; cursor: pointer;
 }
+.rt-btn:hover:not([disabled]) { background: var(--dsw-alias-interactive-bg-hover); }
 .rt-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
 .rt-btn-primary {
   border-color: transparent;
-  background: var(--dsw-alias-accent-bg, #4c6ef5); color: var(--dsw-alias-accent-fg, #fff);
+  background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-inverted);
 }
-.rt-btn-primary:hover:not([disabled]) { filter: brightness(1.06); }
+.rt-btn-primary:hover:not([disabled]) { background: var(--dsw-alias-button-primary-hover); }
 `
 
     /** 挂样式表。`data-plugin` 必须打：模块系统按它认领 <style>，否则会被别的插件带走。 */
@@ -158,6 +211,12 @@ window.__ModuleLoader__.load({
           turns: '',
           /** 新会话的名称。空串表示沿用旧标题加" · 尾部会话"后缀。 */
           title: '',
+          /** 选定的预设 id。空串表示"跟随原会话"。 */
+          preset: '',
+          /** 可选预设清单（打开弹窗时拉一次）。 */
+          presets: [],
+          /** 预设列表是否展开。 */
+          presetOpen: false,
           /** 是否带上压缩摘要（不勾就看不清压缩点之前的结论）。 */
           includeSummary: true,
           /** 是否把没跑完那一轮的前半截也接上。 */
@@ -165,16 +224,27 @@ window.__ModuleLoader__.load({
           /** idle | working | done | failed */
           phase: 'idle',
           text: '',
+          /** 成功后自动关闭弹窗，结果用 toast 短暂提示。 */
+          toast: '',
         }),
         actions: {
-          openDialog: (draft) => { draft.open = true; draft.phase = 'idle'; draft.text = '' },
+          openDialog: (draft) => { draft.open = true; draft.phase = 'idle'; draft.text = ''; draft.toast = '' },
           closeDialog: (draft) => { draft.open = false; draft.phase = 'idle'; draft.text = '' },
           setTurns: (draft, value) => { draft.turns = value },
           setTitle: (draft, value) => { draft.title = value },
+          setPreset: (draft, value) => { draft.preset = value; draft.presetOpen = false },
+          setPresetOpen: (draft, value) => { draft.presetOpen = value },
+          setPresets: (draft, value) => { draft.presets = value },
           toggleSummary: (draft) => { draft.includeSummary = !draft.includeSummary },
           toggleInterrupted: (draft) => { draft.includeInterruptedTurn = !draft.includeInterruptedTurn },
           start: (draft) => { draft.phase = 'working'; draft.text = '' },
-          finish: (draft, text) => { draft.phase = 'done'; draft.text = text },
+          finish: (draft, text) => {
+            draft.open = false
+            draft.phase = 'done'
+            draft.text = ''
+            draft.toast = text
+          },
+          clearToast: (draft) => { draft.toast = '' },
           fail: (draft, text) => { draft.phase = 'failed'; draft.text = text },
         },
       })
@@ -198,7 +268,15 @@ window.__ModuleLoader__.load({
         const { sessionId, useStore, actions } = props || {}
         const open = typeof useStore === 'function' ? useStore((state) => state.open) : false
         const disabled = sessionId === undefined || sessionId === null || !actions
-        return h('span', { className: 'rt-root' },
+        const toast = typeof useStore === 'function' ? useStore((state) => state.toast) : ''
+        React.useEffect(() => {
+          if (toast === '' || !actions) return undefined
+          const timer = setTimeout(() => { actions.clearToast() }, 12000)
+          return () => { clearTimeout(timer) }
+        }, [toast])
+        return h('span', { className: 'rt-root' }, toast !== '' && typeof document !== 'undefined'
+          ? createPortal(h('div', { className: 'rt-toast', role: 'status', 'aria-live': 'polite' }, toast), document.body)
+          : null,
           h('button', {
             type: 'button',
             className: 'rt-pill',
@@ -215,6 +293,18 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 预设 id 对应的显示名。空串是"跟随原会话"。
+     * @param presets - 清单。
+     * @param id - 当前选中的 id。
+     * @returns 给按钮显示的文字。
+     */
+    function presetLabelFor(presets, id) {
+      if (typeof id !== 'string' || id.length === 0) return '跟随原会话'
+      const row = presets.find(candidate => candidate.id === id)
+      return row === undefined ? id : row.label
+    }
+
+    /**
      * 弹窗。挂在 `conversation.input.dock`。
      * @param store - 与药丸同一个 store 座位。
      * @returns 组件。
@@ -227,17 +317,54 @@ window.__ModuleLoader__.load({
         const open = read((state) => state.open) === true
         const turns = read((state) => state.turns) ?? ''
         const title = read((state) => state.title) ?? ''
+        const preset = read((state) => state.preset) ?? ''
+        const presets = read((state) => state.presets) ?? []
+        const presetOpen = read((state) => state.presetOpen) === true
         const includeSummary = read((state) => state.includeSummary) !== false
         const includeInterruptedTurn = read((state) => state.includeInterruptedTurn) !== false
         const phase = read((state) => state.phase) ?? 'idle'
         const text = read((state) => state.text) ?? ''
         const numberRef = React.useRef(null)
         const titleRef = React.useRef(null)
+        const presetRef = React.useRef(null)
 
         React.useEffect(() => {
           if (!open) return undefined
           const timer = setTimeout(() => { titleRef.current?.focus() }, 0)
           return () => { clearTimeout(timer) }
+        }, [open])
+
+        // 点列表外面收起。用捕获阶段，免得被内层按钮的 click 先吃掉。
+        React.useEffect(() => {
+          if (!presetOpen) return undefined
+          const onDown = (event) => {
+            if (presetRef.current?.contains(event.target)) return
+            actions?.setPresetOpen(false)
+          }
+          document.addEventListener('mousedown', onDown, true)
+          return () => { document.removeEventListener('mousedown', onDown, true) }
+        }, [presetOpen])
+
+        // 打开时拉一次可选预设：宿主可能随时增删预设，缓存太久会显示过时清单。
+        React.useEffect(() => {
+          if (!open || !actions) return undefined
+          let cancelled = false
+          void (async () => {
+            try {
+              const response = await fetch(PRESETS_ROUTE, { headers: { accept: 'application/json' } })
+              const payload = await response.json().catch(() => null)
+              if (cancelled || payload?.ok !== true || !Array.isArray(payload.presets)) return
+              actions.setPresets(payload.presets.map(row => ({
+                id: String(row.id),
+                label: typeof row.name === 'string' && row.name.length > 0 ? row.name : String(row.id),
+                ...(typeof row.description === 'string' ? { description: row.description } : {}),
+                ...(typeof row.broken === 'string' ? { broken: row.broken } : {}),
+              })))
+            } catch {
+              // 拉不到就只显示"跟随原会话"，分切本身不受影响。
+            }
+          })()
+          return () => { cancelled = true }
         }, [open])
 
         if (!open) return null
@@ -268,6 +395,7 @@ window.__ModuleLoader__.load({
                 sessionId,
                 ...(parsedTurns === undefined ? {} : { turns: parsedTurns }),
                 ...(trimmedTitle.length === 0 ? {} : { title: trimmedTitle }),
+                ...(preset.length === 0 ? {} : { preset }),
                 includeSummary,
                 includeInterruptedTurn,
               }),
@@ -318,6 +446,37 @@ window.__ModuleLoader__.load({
                   onChange: (event) => { actions.setTitle(event.target.value) },
                   onKeyDown: (event) => { if (event.key === 'Enter') void run() },
                 })),
+              h('div', { className: 'rt-row rt-row-top' },
+                h('span', { className: 'rt-label' }, '预设'),
+                // 原生 <select> 的展开列表是浏览器自绘的，配色只跟 color-scheme 走、
+                // 选中行还盖着一层系统高亮；改用自绘列表才能跟宿主菜单一致。
+                h('div', { className: 'rt-picker', ref: presetRef },
+                  h('button', {
+                    type: 'button',
+                    className: 'rt-text rt-trigger',
+                    disabled: working,
+                    'aria-haspopup': 'listbox',
+                    'aria-expanded': presetOpen ? 'true' : 'false',
+                    onClick: () => { actions.setPresetOpen(!presetOpen) },
+                    onKeyDown: (event) => {
+                      if (event.key === 'Escape' && presetOpen) { event.stopPropagation(); actions.setPresetOpen(false) }
+                    },
+                  },
+                  h('span', { className: 'rt-trigger-label' }, presetLabelFor(presets, preset)),
+                  h('span', { className: 'rt-caret', 'aria-hidden': 'true' })),
+                  presetOpen ? h('div', { className: 'rt-list', role: 'listbox' },
+                    ...[{ id: '', label: '跟随原会话' }, ...presets].map(row => h('button', {
+                      key: row.id || '__follow',
+                      type: 'button',
+                      role: 'option',
+                      'aria-selected': (row.id || '') === (preset || '') ? 'true' : 'false',
+                      className: 'rt-item',
+                      disabled: typeof row.broken === 'string',
+                      onClick: () => { actions.setPreset(row.id || '') },
+                    },
+                    h('span', { className: 'rt-item-label' }, row.label),
+                    typeof row.broken === 'string' ? h('span', { className: 'rt-item-note' }, '不可用') : null))
+                  ) : null)),
               h('div', { className: 'rt-row' },
                 h('span', { className: 'rt-label' }, '保留轮次'),
                 h('input', {
@@ -347,7 +506,7 @@ window.__ModuleLoader__.load({
                 type: 'button', className: 'rt-btn', disabled: working,
                 onMouseDown: (event) => { event.preventDefault() },
                 onClick: () => { actions.closeDialog() },
-              }, phase === 'done' ? '完成' : '取消'))))
+              }, '取消'))))
         return typeof document === 'undefined' ? modal : createPortal(modal, document.body)
       }
     }
